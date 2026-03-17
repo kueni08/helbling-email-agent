@@ -10,3 +10,8 @@ knowledge_base/web_cache/*/
 !knowledge_base/web_cache/.gitkeep
 *.xlsx
 *.pdf
+
+cloudflared.exe
+inbox/erfasst/
+knowledge_base/web_cache/
+*.rej

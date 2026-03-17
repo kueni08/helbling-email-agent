@@ -98,13 +98,27 @@ web_sources:
     exclude_patterns: []
     category: "sibox"
     refresh_interval_hours: 168
-  - name: "FACETTESTAR Info"
+  - name: "FACETTESTAR Website"
     url: "https://www.facettestar.ch"
-    crawl_depth: 2
+    crawl_depth: 3
     include_patterns:
       - "*"
-    exclude_patterns: []
+    exclude_patterns:
+      - "/impressum/"
+      - "/datenschutz/"
     category: "facettestar"
+    refresh_interval_hours: 168
+
+  - name: "Helbling Website"
+    url: "https://www.helbling.net"
+    crawl_depth: 3
+    include_patterns:
+      - "*"
+    exclude_patterns:
+      - "/impressum/"
+      - "/datenschutz/"
+      - "/agb/"
+    category: "allgemein"
     refresh_interval_hours: 168
 
 # Knowledge Base
