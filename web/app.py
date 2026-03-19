@@ -31,6 +31,13 @@ def create_app(config: dict = None) -> Flask:
     )
     app.config["SECRET_KEY"] = "helbling-email-agent-2026"
     app.config["HELBLING_CONFIG"] = config
+    app.config["JSON_AS_ASCII"] = False
+
+    @app.after_request
+    def set_utf8_header(response):
+        if response.content_type and "json" in response.content_type:
+            response.headers["Content-Type"] = "application/json; charset=utf-8"
+        return response
 
     from src.utils import resolve_path
     paths = config.get("paths", {})
@@ -203,6 +210,12 @@ def create_app(config: dict = None) -> Flask:
     def api_emails():
         """Liste verarbeiteter E-Mails."""
         results = get_all_results()
+        # Anhang-Info hinzufuegen
+        for r in results:
+            eid = r.get("email_id")
+            if eid:
+                att_dir = output_path / "attachments" / eid
+                r["has_attachments"] = att_dir.exists() and any(att_dir.iterdir()) if att_dir.exists() else False
         return jsonify(results)
 
     @app.route("/api/emails/<email_id>")
@@ -216,6 +229,29 @@ def create_app(config: dict = None) -> Flask:
             if r.get("email_id") == email_id:
                 return jsonify(r)
         return jsonify({"error": "Nicht gefunden"}), 404
+
+    @app.route("/api/emails/<email_id>/attachments")
+    def api_email_attachments(email_id):
+        """Listet Anhaenge einer E-Mail auf."""
+        att_dir = output_path / "attachments" / email_id
+        if not att_dir.exists():
+            return jsonify([])
+        files = []
+        for f in sorted(att_dir.iterdir()):
+            if f.is_file():
+                files.append({
+                    "filename": f.name,
+                    "size_kb": round(f.stat().st_size / 1024, 1),
+                    "download_url": f"/api/emails/{email_id}/attachments/{f.name}",
+                })
+        return jsonify(files)
+
+    @app.route("/api/emails/<email_id>/attachments/<path:filename>")
+    def api_email_attachment_download(email_id, filename):
+        """Download eines Anhangs."""
+        att_dir = output_path / "attachments" / email_id
+        safe_name = secure_filename(filename)
+        return send_from_directory(str(att_dir), safe_name)
 
     @app.route("/api/emails/<email_id>/delete", methods=["POST"])
     def api_email_delete(email_id):
@@ -713,6 +749,137 @@ def create_app(config: dict = None) -> Flask:
         if tpl_path.exists():
             tpl_path.unlink()
         return jsonify({"ok": True})
+
+    # ---- RULES (Geschaeftslogik-Regeln) ----
+
+    rules_file = output_path / "product_rules.json"
+
+    def _load_rules() -> list:
+        """Laedt alle Regeln."""
+        if not rules_file.exists():
+            return []
+        try:
+            with open(rules_file, encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("rules", [])
+        except Exception:
+            return []
+
+    def _save_rules(rules: list):
+        """Speichert alle Regeln."""
+        rules_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(rules_file, "w", encoding="utf-8") as f:
+            json.dump({"rules": rules}, f, ensure_ascii=False, indent=2)
+
+    @app.route("/api/rules")
+    def api_rules():
+        """Liste aller Regeln."""
+        return jsonify(_load_rules())
+
+    @app.route("/api/rules/confirm", methods=["POST"])
+    def api_rules_confirm():
+        """Speichert eine vorgeschlagene Regel."""
+        data = request.get_json() or {}
+        name = data.get("name", "").strip()
+        if not name:
+            return jsonify({"error": "Kein Name"}), 400
+
+        rules = _load_rules()
+        import random
+        rule_id = f"rule-{random.randint(1000, 9999)}"
+        rule = {
+            "id": rule_id,
+            "name": name,
+            "beschreibung": data.get("beschreibung", ""),
+            "bedingung": data.get("bedingung", ""),
+            "aktion": data.get("aktion", ""),
+            "aktiv": True,
+            "erstellt_am": datetime.now().isoformat(),
+        }
+        rules.append(rule)
+        _save_rules(rules)
+        return jsonify({"ok": True, "rule": rule})
+
+    @app.route("/api/rules/<rule_id>/toggle", methods=["POST"])
+    def api_rules_toggle(rule_id):
+        """Aktiviert/deaktiviert eine Regel."""
+        data = request.get_json() or {}
+        rules = _load_rules()
+        for r in rules:
+            if r.get("id") == rule_id:
+                r["aktiv"] = data.get("aktiv", not r.get("aktiv", True))
+                _save_rules(rules)
+                return jsonify({"ok": True})
+        return jsonify({"error": "Nicht gefunden"}), 404
+
+    @app.route("/api/rules/<rule_id>/delete", methods=["POST"])
+    def api_rules_delete(rule_id):
+        """Loescht eine Regel."""
+        rules = _load_rules()
+        rules = [r for r in rules if r.get("id") != rule_id]
+        _save_rules(rules)
+        return jsonify({"ok": True})
+
+    @app.route("/api/rules/chat", methods=["POST"])
+    def api_rules_chat():
+        """Chat-basierte Regelerstellung via Claude."""
+        data = request.get_json() or {}
+        message = data.get("message", "").strip()
+        history = data.get("history", [])
+        if not message:
+            return jsonify({"error": "Keine Nachricht"}), 400
+
+        # Bestehende Regeln als Kontext
+        existing_rules = _load_rules()
+        rules_context = ""
+        if existing_rules:
+            rules_context = "Bestehende Regeln:\n" + "\n".join(
+                f"- {r['name']}: {r.get('beschreibung', '')}" for r in existing_rules
+            )
+
+        prompt = f"""\
+Du bist ein Assistent fuer die Konfiguration von Geschaeftslogik-Regeln bei Helbling & Co. AG (Schluesselboxen, Sicherheitssysteme).
+Regeln definieren automatische Produktzuordnungen bei Bestellungen oder Anfragen.
+
+{rules_context}
+
+Der Benutzer moechte eine neue Regel erstellen. Analysiere die Anfrage und schlage eine strukturierte Regel vor.
+
+Antworte auf Deutsch (Schweizer Hochdeutsch, kein ss statt ß). Gib zuerst eine kurze Erklaerung, dann schlage die Regel im JSON-Format vor.
+
+Benutzeranfrage: {message}
+
+Antwort im JSON-Format:
+{{
+  "reply": "Deine Erklaerung an den Benutzer",
+  "suggested_rule": {{
+    "name": "Kurzname der Regel",
+    "beschreibung": "Was die Regel tut",
+    "bedingung": "Wann die Regel greift (z.B. Produkt enthaelt 'Schluesselbox')",
+    "aktion": "Was passiert (z.B. Schluesselhalter Flex hinzufuegen)"
+  }}
+}}
+
+Falls der Benutzer keine konkrete Regel beschreibt sondern eine Frage stellt, antworte nur mit:
+{{
+  "reply": "Deine Antwort",
+  "suggested_rule": null
+}}
+"""
+
+        try:
+            from src.api_client import APIClient
+            api = APIClient(config)
+            result = api.complete_json(prompt)
+            return jsonify({
+                "reply": result.get("reply", "Ich konnte die Anfrage nicht verarbeiten."),
+                "suggested_rule": result.get("suggested_rule"),
+            })
+        except Exception as e:
+            return jsonify({
+                "reply": f"Fehler bei der Verarbeitung: {str(e)}",
+                "suggested_rule": None,
+            })
 
     # ---- INBOX DIRECTORY CONFIG ----
 

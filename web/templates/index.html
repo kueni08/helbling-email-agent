@@ -27,6 +27,7 @@
     <button class="tab-btn" data-tab="vorlagen">Vorlagen</button>
     <button class="tab-btn" data-tab="knowledge">Wissensdatenbank</button>
     <button class="tab-btn" data-tab="stats">Statistik</button>
+    <button class="tab-btn" data-tab="rules">Regeln</button>
     <button class="tab-btn" data-tab="settings">Einstellungen</button>
   </nav>
 
@@ -160,6 +161,32 @@
       </div>
       <div id="stats-container">
         <p class="loading">Lade Statistiken...</p>
+      </div>
+    </section>
+
+    <!-- TAB: RULES -->
+    <section id="tab-rules" class="tab-content">
+      <div class="section-header">
+        <h2>Geschaeftslogik-Regeln</h2>
+      </div>
+      <p style="color:var(--text-dim);font-size:13px;margin-bottom:16px">
+        Definieren Sie Regeln fuer automatische Produktzuordnungen (z.B. "Bei jeder Schluesselbox automatisch Schluesselhalter Flex dazulegen").
+        Nutzen Sie das Prompt-Fenster unten, um Regeln im Dialog zu erstellen.
+      </p>
+      <div id="rules-container">
+        <p class="loading">Lade Regeln...</p>
+      </div>
+      <div style="margin-top:20px">
+        <h3 style="font-size:14px;margin-bottom:8px">Neue Regel erstellen</h3>
+        <div class="rule-chat-container">
+          <div class="rule-chat-messages" id="rule-chat-messages">
+            <div class="rule-chat-msg assistant">Willkommen! Beschreiben Sie eine Geschaeftsregel in natuerlicher Sprache, z.B. "Bei jeder Schluesselbox soll automatisch ein Schluesselhalter Flex dazu". Ich schlage Ihnen dann eine strukturierte Regel vor.</div>
+          </div>
+          <div class="rule-chat-input">
+            <textarea id="rule-chat-input" rows="2" placeholder="z.B. Bei jeder Schluesselbox soll ein Schluesselhalter Flex dazu..." onkeydown="handleRuleChatKey(event)"></textarea>
+            <button class="btn btn-primary" onclick="sendRuleChat()">Senden</button>
+          </div>
+        </div>
       </div>
     </section>
 

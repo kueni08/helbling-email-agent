@@ -46,7 +46,10 @@ Erstelle eine Aufgabe im folgenden JSON-Format (keine zusätzlichen Erklärungen
   "kontakt_name": "Name des Kunden/Absenders",
   "kontakt_email": "E-Mail-Adresse",
   "kontakt_telefon": "Telefonnummer falls erwähnt",
-  "produkte": ["Produkt 1", "Produkt 2"],
+  "produkte": [
+    {{"artikelcode": "Z1234567", "artikelname": "Produktname", "menge": 1, "preis": 0.00}},
+    {{"artikelcode": "", "artikelname": "Weiteres Produkt", "menge": 2, "preis": null}}
+  ],
   "notizen": "Weitere wichtige Hinweise aus der E-Mail"
 }}
 """
@@ -203,6 +206,9 @@ class Tasker:
             logger.warning(f"Task-Generierung fehlgeschlagen: {e}, verwende Fallback")
             task = self._fallback_task(parsed_email, classification, prio, due_date)
 
+        # Geschaeftsregeln anwenden
+        task = self._apply_product_rules(task)
+
         logger.info(
             f"Aufgabe erstellt: {task.titel} "
             f"(Prio: {task.prioritaet}, fällig: {task.faellig_bis})"
@@ -321,3 +327,57 @@ class Tasker:
         import random
         rand = random.randint(100, 999)
         return f"TASK-{now.strftime('%Y-%m')}-{rand}"
+
+    def _apply_product_rules(self, task: Task) -> Task:
+        """Wendet Geschaeftslogik-Regeln auf die Produkte an."""
+        try:
+            from .utils import resolve_path
+            rules_path = resolve_path(
+                self.config.get("paths", {}).get("output", "./output")
+            ) / "product_rules.json"
+            if not rules_path.exists():
+                return task
+
+            with open(rules_path, encoding="utf-8") as f:
+                rules_data = json.load(f)
+            rules = [r for r in rules_data.get("rules", []) if r.get("aktiv", True)]
+
+            if not rules or not task.produkte:
+                return task
+
+            added = []
+            for rule in rules:
+                bedingung = rule.get("bedingung", "").lower()
+                aktion = rule.get("aktion", "")
+                # Simple keyword matching on product names
+                for produkt in list(task.produkte):
+                    p_name = ""
+                    if isinstance(produkt, dict):
+                        p_name = (produkt.get("artikelname", "") + " " + produkt.get("artikelcode", "")).lower()
+                    elif isinstance(produkt, str):
+                        p_name = produkt.lower()
+
+                    # Check if condition keywords match any product
+                    cond_words = [w for w in bedingung.replace("'", "").replace('"', '').split() if len(w) > 2]
+                    if any(w in p_name for w in cond_words):
+                        added.append({
+                            "artikelcode": "",
+                            "artikelname": aktion,
+                            "menge": 1,
+                            "preis": None,
+                            "regel_angewendet": rule.get("name", ""),
+                        })
+                        break  # Only add once per rule
+
+            if added:
+                task.produkte.extend(added)
+                if task.notizen:
+                    task.notizen += "\n"
+                task.notizen += "Automatisch hinzugefuegt durch Regeln: " + ", ".join(
+                    a.get("regel_angewendet", "") for a in added
+                )
+
+        except Exception as e:
+            logger.warning(f"Fehler beim Anwenden der Produktregeln: {e}")
+
+        return task

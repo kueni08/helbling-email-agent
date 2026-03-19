@@ -35,6 +35,7 @@ function loadTabData(tab) {
   else if (tab === 'vorlagen') loadTemplates();
   else if (tab === 'knowledge') loadKnowledge();
   else if (tab === 'stats') loadStats();
+  else if (tab === 'rules') loadRules();
   else if (tab === 'settings') loadSettings();
 }
 
@@ -49,6 +50,7 @@ function showToast(msg, type = 'info') {
 
 function closePanel(id) {
   document.getElementById(id).classList.add('hidden');
+  document.body.classList.remove('panel-open');
 }
 
 // --- Helpers ---
@@ -138,16 +140,21 @@ async function loadEmails() {
       const pfBadge = postfachBadge(pf);
       const hasEntwurf = e.draft_generated ? '<span class="badge badge-draft">✉ Entwurf</span>' : '';
       const hasTask = e.task_generated ? '<span class="badge badge-task">📋 Aufgabe</span>' : '';
+      const hasAttach = e.has_attachments ? '<span title="Anhänge">📎</span>' : '';
       const prio = clf.dringlichkeit || 'mittel';
       const isDeleted = e.deleted;
       const deletedBadge = isDeleted ? '<span class="badge badge-deleted">🗑 Gelöscht</span>' : '';
       const rowClass = isDeleted ? 'clickable deleted-row' : 'clickable';
+      const senderName = clf.absender || e.from_addr || '—';
+      const dateFormatted = formatDateShort(e.date);
+      const summary = clf.zusammenfassung || '';
       return `
         <tr class="${rowClass}" onclick="showEmailDetail('${e.email_id}')">
-          <td>${e.date || '—'}</td>
+          <td style="white-space:nowrap">${dateFormatted}</td>
           <td>${pfBadge}</td>
-          <td>${e.from_addr || '—'}</td>
-          <td style="max-width:260px">${e.subject || '—'}</td>
+          <td title="${e.from_addr || ''}">${senderName}</td>
+          <td>${e.subject || '—'}${summary ? '<br><span style="font-size:11px;color:var(--text-dim)">' + summary.substring(0, 80) + '</span>' : ''}</td>
+          <td>${hasAttach}</td>
           <td>${bereichBadge(clf.bereich)}</td>
           <td><span class="badge badge-info">${clf.aktionstyp || '—'}</span></td>
           <td>${prioBadge(prio)}</td>
@@ -159,7 +166,7 @@ async function loadEmails() {
       <table class="data-table">
         <thead><tr>
           <th>Datum</th><th>Postfach</th><th>Von</th><th>Betreff</th>
-          <th>Bereich</th><th>Typ</th><th>Priorität</th><th>Status</th>
+          <th>📎</th><th>Bereich</th><th>Typ</th><th>Priorität</th><th>Status</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -172,14 +179,18 @@ async function showEmailDetail(emailId) {
   const panel = document.getElementById('email-detail-panel');
   const content = document.getElementById('email-detail-content');
   panel.classList.remove('hidden');
+  document.body.classList.add('panel-open');
   content.innerHTML = '<p class="loading">Lade Details...</p>';
 
   try {
     const data = await API.get(`/api/emails/${emailId}`);
     const clf = data.classification || {};
     const ta = data.thread_analysis || {};
+    const attachments = await API.get(`/api/emails/${emailId}/attachments`).catch(() => []);
 
     var pf = detectPostfach(data);
+    var produkteHtml = renderProduktTabelle(data.produkte || (data.task_data || {}).produkte);
+
     content.innerHTML = `
       <h2 style="margin-bottom:16px;font-size:16px">${data.subject || 'E-Mail Detail'}</h2>
       <div class="detail-section">
@@ -190,6 +201,18 @@ async function showEmailDetail(emailId) {
         <div class="detail-row"><span class="detail-label">Datum:</span><span>${data.date || '—'}</span></div>
         <div class="detail-row"><span class="detail-label">ID:</span><span style="font-size:11px;color:var(--text-dim)">${data.email_id || '—'}</span></div>
       </div>
+      ${attachments.length ? `
+        <div class="detail-section">
+          <h3>Anhaenge (${attachments.length})</h3>
+          <div class="attachment-list">
+            ${attachments.map(a => `
+              <a href="${a.download_url}" target="_blank" class="attachment-item" download>
+                <span class="attachment-icon">${getFileIcon(a.filename)}</span>
+                <span>${a.filename}</span>
+                <span class="attachment-size">${a.size_kb} KB</span>
+              </a>`).join('')}
+          </div>
+        </div>` : ''}
       ${data.pipeline_steps ? '<div class="detail-section"><h3>Pipeline</h3>' + renderPipeline(data.pipeline_steps) + '</div>' : ''}
       <div class="detail-section">
         <h3>Klassifikation</h3>
@@ -198,13 +221,14 @@ async function showEmailDetail(emailId) {
         <div class="detail-row"><span class="detail-label">Dringlichkeit:</span>${prioBadge(clf.dringlichkeit)}</div>
         <div class="detail-row"><span class="detail-label">Zusammenfassung:</span><span style="color:var(--text-dim)">${clf.zusammenfassung || '—'}</span></div>
       </div>
+      ${produkteHtml ? '<div class="detail-section"><h3>Produkte</h3>' + produkteHtml + '</div>' : ''}
       <div class="detail-section">
         <h3>Thread-Analyse</h3>
         <div class="detail-row"><span class="detail-label">Nachrichten:</span><span>${ta.anzahl_nachrichten || 1}</span></div>
-        <div class="detail-row"><span class="detail-label">Tonalität:</span><span>${ta.tonalitaet || '—'}</span></div>
+        <div class="detail-row"><span class="detail-label">Tonalitaet:</span><span>${ta.tonalitaet || '—'}</span></div>
         <div class="detail-row"><span class="detail-label">Zusammenfassung:</span><span style="color:var(--text-dim)">${ta.zusammenfassung || '—'}</span></div>
         ${ta.offene_punkte?.length ? `<div class="detail-row"><span class="detail-label">Offen:</span><span>${ta.offene_punkte.join(', ')}</span></div>` : ''}
-        <div class="detail-row"><span class="detail-label">Nächster Schritt:</span><span>${ta.naechster_schritt || '—'}</span></div>
+        <div class="detail-row"><span class="detail-label">Naechster Schritt:</span><span>${ta.naechster_schritt || '—'}</span></div>
       </div>
       ${data.draft_file ? `
         <div class="detail-section">
@@ -217,7 +241,7 @@ async function showEmailDetail(emailId) {
           <button class="btn btn-secondary btn-sm" onclick="showTaskById('${data.task_id}')">📋 ${data.task_id}</button>
         </div>` : ''}
       <div style="display:flex;gap:8px;margin-top:16px;border-top:1px solid var(--border);padding-top:16px">
-        ${!data.deleted ? `<button class="btn btn-danger btn-sm" onclick="deleteEmail('${data.email_id}')">🗑 Löschen</button>` : '<span style="color:var(--text-dim);font-size:12px">🗑 Bereits gelöscht</span>'}
+        ${!data.deleted ? `<button class="btn btn-danger btn-sm" onclick="deleteEmail('${data.email_id}')">🗑 Loeschen</button>` : '<span style="color:var(--text-dim);font-size:12px">🗑 Bereits geloescht</span>'}
       </div>
     `;
   } catch (e) {
@@ -283,6 +307,7 @@ async function showDraftById(fileId) {
   const panel = document.getElementById('draft-detail-panel');
   const content = document.getElementById('draft-detail-content');
   panel.classList.remove('hidden');
+  document.body.classList.add('panel-open');
   content.innerHTML = '<p class="loading">Lade Entwurf...</p>';
 
   try {
@@ -475,6 +500,7 @@ async function showTaskById(taskId) {
   const panel = document.getElementById('task-detail-panel');
   const content = document.getElementById('task-detail-content');
   panel.classList.remove('hidden');
+  document.body.classList.add('panel-open');
   content.innerHTML = '<p class="loading">Lade Aufgabe...</p>';
 
   try {
@@ -513,7 +539,7 @@ async function showTaskById(taskId) {
       ${task.produkte?.length ? `
         <div class="detail-section">
           <h3>Produkte</h3>
-          ${task.produkte.map(p => `<div>• ${p}</div>`).join('')}
+          ${renderProduktTabelle(task.produkte)}
         </div>` : ''}
       <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px">
         ${task.status !== 'erledigt' ? `<button class="btn btn-success btn-sm" onclick="updateTaskStatus('${task.id}','erledigt')">Als erledigt markieren</button>` : ''}
@@ -931,6 +957,7 @@ async function showTemplateDetail(name) {
   var panel = document.getElementById('template-detail-panel');
   var content = document.getElementById('template-detail-content');
   panel.classList.remove('hidden');
+  document.body.classList.add('panel-open');
   content.innerHTML = '<p class="loading">Lade Vorlage...</p>';
   try {
     var tpl = await API.get('/api/templates/' + encodeURIComponent(name));
@@ -1117,6 +1144,158 @@ function removePostfach(index) {
   renderPostfaecher();
   updatePostfachFilter();
   showToast('Postfach entfernt', 'success');
+}
+
+// --- HELPER: Date Formatting ---
+function formatDateShort(dateStr) {
+  if (!dateStr) return '—';
+  try {
+    var d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    var day = String(d.getDate()).padStart(2, '0');
+    var month = String(d.getMonth() + 1).padStart(2, '0');
+    var year = d.getFullYear();
+    var hours = String(d.getHours()).padStart(2, '0');
+    var mins = String(d.getMinutes()).padStart(2, '0');
+    return day + '.' + month + '.' + year + ' ' + hours + ':' + mins;
+  } catch (e) { return dateStr; }
+}
+
+// --- HELPER: File Icons ---
+function getFileIcon(filename) {
+  if (!filename) return '📄';
+  var ext = filename.split('.').pop().toLowerCase();
+  var icons = { pdf: '📕', doc: '📘', docx: '📘', xls: '📗', xlsx: '📗', ppt: '📙', pptx: '📙', jpg: '🖼', jpeg: '🖼', png: '🖼', gif: '🖼', zip: '📦', rar: '📦', txt: '📝', csv: '📊' };
+  return icons[ext] || '📄';
+}
+
+// --- HELPER: Product Table ---
+function renderProduktTabelle(produkte) {
+  if (!produkte || !produkte.length) return '';
+  // Check if structured (objects) or simple (strings)
+  var isStructured = typeof produkte[0] === 'object' && produkte[0] !== null;
+  if (isStructured) {
+    var rows = produkte.map(function(p) {
+      return '<tr>' +
+        '<td>' + (p.artikelcode || '—') + '</td>' +
+        '<td>' + (p.artikelname || p.name || '—') + '</td>' +
+        '<td>' + (p.menge != null ? p.menge : '—') + '</td>' +
+        '<td>' + (p.preis != null ? Number(p.preis).toFixed(2) + ' CHF' : '—') + '</td>' +
+      '</tr>';
+    }).join('');
+    return '<table class="data-table product-table">' +
+      '<thead><tr><th>Artikelcode</th><th>Artikelname</th><th>Menge</th><th>Preis</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>';
+  }
+  // Fallback: simple string list
+  return produkte.map(function(p) { return '<div style="padding:2px 0">• ' + p + '</div>'; }).join('');
+}
+
+// --- RULES ---
+var ruleChatHistory = [];
+
+async function loadRules() {
+  var container = document.getElementById('rules-container');
+  if (!container) return;
+  container.innerHTML = '<p class="loading">Lade Regeln...</p>';
+  try {
+    var rules = await API.get('/api/rules');
+    var rulesListHtml = '';
+    if (rules.length) {
+      rulesListHtml = '<div class="card">' +
+        rules.map(function(r) {
+          return '<div class="rule-row">' +
+            '<div class="rule-name">' + r.name + '</div>' +
+            '<div class="rule-desc">' + (r.beschreibung || '') + '</div>' +
+            '<label class="rule-toggle" title="' + (r.aktiv ? 'Aktiv' : 'Inaktiv') + '"><input type="checkbox" ' + (r.aktiv ? 'checked' : '') + ' onchange="toggleRule(\'' + r.id + '\', this.checked)"></label>' +
+            '<button class="btn btn-danger btn-sm" onclick="deleteRule(\'' + r.id + '\')">x</button>' +
+          '</div>';
+        }).join('') +
+      '</div>';
+    } else {
+      rulesListHtml = '<div class="empty-state"><p>Noch keine Regeln definiert. Nutzen Sie das Prompt-Fenster unten.</p></div>';
+    }
+    container.innerHTML = rulesListHtml;
+  } catch (e) {
+    container.innerHTML = '<p style="color:var(--red)">Fehler: ' + e.message + '</p>';
+  }
+}
+
+async function sendRuleChat() {
+  var input = document.getElementById('rule-chat-input');
+  var msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  var messagesDiv = document.getElementById('rule-chat-messages');
+  // Add user message
+  messagesDiv.innerHTML += '<div class="rule-chat-msg user">' + escapeHtml(msg) + '</div>';
+  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+  ruleChatHistory.push({ role: 'user', content: msg });
+
+  // Show typing indicator
+  messagesDiv.innerHTML += '<div class="rule-chat-msg assistant" id="rule-typing">Denke nach...</div>';
+  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+  try {
+    var response = await API.post('/api/rules/chat', { message: msg, history: ruleChatHistory });
+    document.getElementById('rule-typing')?.remove();
+
+    var replyHtml = '<div class="rule-chat-msg assistant">' + escapeHtml(response.reply);
+    if (response.suggested_rule) {
+      replyHtml += '<div class="suggested-rule">' +
+        '<strong>' + response.suggested_rule.name + '</strong><br>' +
+        '<span style="color:var(--text-dim)">' + response.suggested_rule.beschreibung + '</span><br>' +
+        '<div style="margin-top:6px"><button class="btn btn-success btn-sm" onclick=\'confirmRule(' + JSON.stringify(response.suggested_rule).replace(/'/g, "\\'") + ')\'>Regel uebernehmen</button></div>' +
+      '</div>';
+    }
+    replyHtml += '</div>';
+    messagesDiv.innerHTML += replyHtml;
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+    ruleChatHistory.push({ role: 'assistant', content: response.reply });
+  } catch (e) {
+    document.getElementById('rule-typing')?.remove();
+    messagesDiv.innerHTML += '<div class="rule-chat-msg assistant" style="color:var(--red)">Fehler: ' + e.message + '</div>';
+  }
+}
+
+async function confirmRule(rule) {
+  try {
+    await API.post('/api/rules/confirm', rule);
+    showToast('Regel "' + rule.name + '" gespeichert', 'success');
+    loadRules();
+  } catch (e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
+}
+
+async function toggleRule(ruleId, aktiv) {
+  try {
+    await API.post('/api/rules/' + ruleId + '/toggle', { aktiv: aktiv });
+    showToast('Regel ' + (aktiv ? 'aktiviert' : 'deaktiviert'), 'info');
+  } catch (e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
+}
+
+async function deleteRule(ruleId) {
+  if (!confirm('Regel wirklich loeschen?')) return;
+  try {
+    await API.post('/api/rules/' + ruleId + '/delete', {});
+    showToast('Regel geloescht', 'success');
+    loadRules();
+  } catch (e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
+}
+
+function handleRuleChatKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendRuleChat();
+  }
 }
 
 // --- Signaturen Cache ---
