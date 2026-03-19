@@ -32,8 +32,10 @@ function loadTabData(tab) {
   if (tab === 'inbox') loadEmails();
   else if (tab === 'drafts') loadDrafts();
   else if (tab === 'tasks') loadTasks();
+  else if (tab === 'vorlagen') loadTemplates();
   else if (tab === 'knowledge') loadKnowledge();
   else if (tab === 'stats') loadStats();
+  else if (tab === 'settings') loadSettings();
 }
 
 // --- Toast ---
@@ -67,16 +69,62 @@ function highlightCheckMarkers(text) {
   return text.replace(/\[PRÜFEN:[^\]]*\]/g, m => `<span class="check-marker">${m}</span>`);
 }
 
+// --- POSTFACH HELPERS ---
+function getPostfaecher() {
+  try {
+    return JSON.parse(localStorage.getItem('postfaecher') || '[]');
+  } catch(e) { return []; }
+}
+
+function detectPostfach(email) {
+  var toAddrs = (email.to_addrs || []).concat(email.cc_addrs || []);
+  var toStr = toAddrs.join(',').toLowerCase();
+  // Also check the raw to_addr field
+  if (email.to_addr) toStr += ',' + email.to_addr.toLowerCase();
+  var postfaecher = getPostfaecher();
+  for (var i = 0; i < postfaecher.length; i++) {
+    if (toStr.indexOf(postfaecher[i].email.toLowerCase()) !== -1) {
+      return postfaecher[i];
+    }
+  }
+  return null;
+}
+
+function postfachBadge(pf) {
+  if (!pf) return '';
+  return '<span class="badge" style="background:' + pf.color + '22;color:' + pf.color + '">' + pf.label + '</span>';
+}
+
+function updatePostfachFilter() {
+  var select = document.getElementById('filter-postfach');
+  if (!select) return;
+  var postfaecher = getPostfaecher();
+  var html = '<option value="">Alle Postfaecher</option>';
+  postfaecher.forEach(function(pf) {
+    html += '<option value="' + pf.email + '">' + pf.label + ' (' + pf.email + ')</option>';
+  });
+  select.innerHTML = html;
+}
+
 // --- INBOX ---
 async function loadEmails() {
   const container = document.getElementById('emails-table-container');
   container.innerHTML = '<p class="loading">Lade E-Mails...</p>';
+  updatePostfachFilter();
   try {
     const emails = await API.get('/api/emails');
     const bereichFilter = document.getElementById('filter-bereich').value;
-    const filtered = bereichFilter
+    const postfachFilter = document.getElementById('filter-postfach')?.value || '';
+    let filtered = bereichFilter
       ? emails.filter(e => e.classification?.bereich === bereichFilter)
       : emails;
+
+    if (postfachFilter) {
+      filtered = filtered.filter(function(e) {
+        var pf = detectPostfach(e);
+        return pf && pf.email.toLowerCase() === postfachFilter.toLowerCase();
+      });
+    }
 
     if (!filtered.length) {
       container.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>Keine E-Mails vorhanden.<br>Klicken Sie auf "Inbox verarbeiten".</p></div>';
@@ -86,6 +134,8 @@ async function loadEmails() {
     const rows = filtered.map(e => {
       if (!e.email_id) return '';
       const clf = e.classification || {};
+      const pf = detectPostfach(e);
+      const pfBadge = postfachBadge(pf);
       const hasEntwurf = e.draft_generated ? '<span class="badge badge-draft">✉ Entwurf</span>' : '';
       const hasTask = e.task_generated ? '<span class="badge badge-task">📋 Aufgabe</span>' : '';
       const prio = clf.dringlichkeit || 'mittel';
@@ -95,6 +145,7 @@ async function loadEmails() {
       return `
         <tr class="${rowClass}" onclick="showEmailDetail('${e.email_id}')">
           <td>${e.date || '—'}</td>
+          <td>${pfBadge}</td>
           <td>${e.from_addr || '—'}</td>
           <td style="max-width:260px">${e.subject || '—'}</td>
           <td>${bereichBadge(clf.bereich)}</td>
@@ -107,7 +158,7 @@ async function loadEmails() {
     container.innerHTML = `
       <table class="data-table">
         <thead><tr>
-          <th>Datum</th><th>Von</th><th>Betreff</th>
+          <th>Datum</th><th>Postfach</th><th>Von</th><th>Betreff</th>
           <th>Bereich</th><th>Typ</th><th>Priorität</th><th>Status</th>
         </tr></thead>
         <tbody>${rows}</tbody>
@@ -128,11 +179,14 @@ async function showEmailDetail(emailId) {
     const clf = data.classification || {};
     const ta = data.thread_analysis || {};
 
+    var pf = detectPostfach(data);
     content.innerHTML = `
       <h2 style="margin-bottom:16px;font-size:16px">${data.subject || 'E-Mail Detail'}</h2>
       <div class="detail-section">
         <h3>Metadaten</h3>
+        ${pf ? '<div class="detail-row"><span class="detail-label">Postfach:</span>' + postfachBadge(pf) + '</div>' : ''}
         <div class="detail-row"><span class="detail-label">Von:</span><span>${data.from_addr || '—'}</span></div>
+        <div class="detail-row"><span class="detail-label">An:</span><span>${(data.to_addrs || []).join(', ') || '—'}</span></div>
         <div class="detail-row"><span class="detail-label">Datum:</span><span>${data.date || '—'}</span></div>
         <div class="detail-row"><span class="detail-label">ID:</span><span style="font-size:11px;color:var(--text-dim)">${data.email_id || '—'}</span></div>
       </div>
@@ -848,6 +902,223 @@ async function refineDraft(fileId) {
   }
 }
 
+// --- TEMPLATES (VORLAGEN) ---
+async function loadTemplates() {
+  const container = document.getElementById('templates-container');
+  container.innerHTML = '<p class="loading">Lade Vorlagen...</p>';
+  try {
+    const templates = await API.get('/api/templates');
+    if (!templates.length) {
+      container.innerHTML = '<div class="empty-state"><div class="icon">📝</div><p>Keine Vorlagen vorhanden.</p></div>';
+      return;
+    }
+    const cards = templates.map(function(t) {
+      return '<div class="kb-file-card clickable" onclick="showTemplateDetail(\'' + t.name + '\')">' +
+        '<div>' +
+          '<div class="kb-file-name">📝 ' + t.name + '</div>' +
+          '<div class="kb-file-meta">' + (t.description || t.filename) + ' · ' + t.size_kb + ' KB</div>' +
+        '</div>' +
+        '<span class="badge badge-info">' + t.type + '</span>' +
+      '</div>';
+    }).join('');
+    container.innerHTML = '<div class="kb-files-grid">' + cards + '</div>';
+  } catch(e) {
+    container.innerHTML = '<p style="color:var(--red)">Fehler: ' + e.message + '</p>';
+  }
+}
+
+async function showTemplateDetail(name) {
+  var panel = document.getElementById('template-detail-panel');
+  var content = document.getElementById('template-detail-content');
+  panel.classList.remove('hidden');
+  content.innerHTML = '<p class="loading">Lade Vorlage...</p>';
+  try {
+    var tpl = await API.get('/api/templates/' + encodeURIComponent(name));
+    content.innerHTML =
+      '<h2 style="margin-bottom:16px;font-size:16px">' + tpl.name + '</h2>' +
+      '<div class="detail-section">' +
+        '<h3>HTML-Vorschau</h3>' +
+        '<div class="draft-html-preview">' + tpl.html + '</div>' +
+      '</div>' +
+      '<div class="detail-section">' +
+        '<h3>Quellcode bearbeiten</h3>' +
+        '<textarea id="tpl-edit-' + tpl.name + '" style="width:100%;height:300px;font-family:monospace;font-size:12px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);padding:12px;resize:vertical">' + escapeHtml(tpl.html) + '</textarea>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;margin-top:8px;border-top:1px solid var(--border);padding-top:12px">' +
+        '<button class="btn btn-primary btn-sm" onclick="saveTemplate(\'' + tpl.name + '\')">Speichern</button>' +
+        '<button class="btn btn-danger btn-sm" onclick="deleteTemplate(\'' + tpl.name + '\')">Loeschen</button>' +
+      '</div>';
+  } catch(e) {
+    content.innerHTML = '<p style="color:var(--red)">Fehler: ' + e.message + '</p>';
+  }
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function showNewTemplateForm() {
+  var panel = document.getElementById('template-detail-panel');
+  var content = document.getElementById('template-detail-content');
+  panel.classList.remove('hidden');
+
+  var defaultHtml = '<!DOCTYPE html>\n<html lang="de">\n<head><meta charset="UTF-8"></head>\n<body style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333; line-height: 1.6; margin: 0; padding: 0;">\n<div style="max-width: 680px; margin: 0 auto; padding: 20px;">\n\n<p>{{anrede}}</p>\n\n<p>Vielen Dank fuer Ihre Nachricht zu <strong>{{betreff}}</strong>.</p>\n\n{{inhalt}}\n\n<p>Bei weiteren Fragen stehen wir Ihnen gerne zur Verfuegung.</p>\n\n<div style="margin-top: 30px; padding-top: 15px; border-top: 1px solid #e0e0e0;">\n{{signatur}}\n</div>\n\n</div>\n</body>\n</html>';
+
+  content.innerHTML =
+    '<h2 style="margin-bottom:16px;font-size:16px">Neue Vorlage erstellen</h2>' +
+    '<div class="detail-section">' +
+      '<h3>Name</h3>' +
+      '<input type="text" id="new-tpl-name" placeholder="z.B. nachfrage_preis" style="width:100%" />' +
+      '<p style="font-size:11px;color:var(--text-dim);margin-top:4px">Ohne Dateiendung. Wird als .html gespeichert.</p>' +
+    '</div>' +
+    '<div class="detail-section">' +
+      '<h3>Verfuegbare Platzhalter</h3>' +
+      '<p style="font-size:12px;color:var(--text-dim)">{{anrede}}, {{betreff}}, {{inhalt}}, {{signatur}}</p>' +
+    '</div>' +
+    '<div class="detail-section">' +
+      '<h3>HTML-Inhalt</h3>' +
+      '<textarea id="new-tpl-html" style="width:100%;height:350px;font-family:monospace;font-size:12px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);padding:12px;resize:vertical">' + escapeHtml(defaultHtml) + '</textarea>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;margin-top:8px;border-top:1px solid var(--border);padding-top:12px">' +
+      '<button class="btn btn-primary btn-sm" onclick="createTemplate()">Erstellen</button>' +
+    '</div>';
+}
+
+async function createTemplate() {
+  var name = document.getElementById('new-tpl-name').value.trim();
+  var html = document.getElementById('new-tpl-html').value;
+  if (!name) { showToast('Bitte einen Namen eingeben', 'error'); return; }
+  try {
+    await API.post('/api/templates', { name: name, html: html });
+    showToast('Vorlage "' + name + '" erstellt', 'success');
+    closePanel('template-detail-panel');
+    loadTemplates();
+  } catch(e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
+}
+
+async function saveTemplate(name) {
+  var html = document.getElementById('tpl-edit-' + name).value;
+  try {
+    await API.post('/api/templates/' + encodeURIComponent(name), { html: html });
+    showToast('Vorlage "' + name + '" gespeichert', 'success');
+    showTemplateDetail(name);
+  } catch(e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
+}
+
+async function deleteTemplate(name) {
+  if (!confirm('Vorlage "' + name + '" wirklich loeschen?')) return;
+  try {
+    await API.post('/api/templates/' + encodeURIComponent(name) + '/delete', {});
+    showToast('Vorlage geloescht', 'success');
+    closePanel('template-detail-panel');
+    loadTemplates();
+  } catch(e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
+}
+
+// --- SETTINGS ---
+function loadSettings() {
+  // Inbox-Verzeichnis laden
+  var savedDir = localStorage.getItem('inbox_dir') || '';
+  var input = document.getElementById('inbox-dir-input');
+  if (input) input.value = savedDir;
+
+  // Aktuelle Inbox vom Server laden
+  API.get('/api/config/inbox-dir').then(function(data) {
+    var status = document.getElementById('inbox-dir-status');
+    if (status && data.inbox_dir) {
+      status.innerHTML = 'Aktuell: <strong>' + data.inbox_dir + '</strong>';
+    }
+  }).catch(function() {});
+
+  // Postfaecher anzeigen
+  renderPostfaecher();
+}
+
+function saveInboxDir() {
+  var dir = document.getElementById('inbox-dir-input').value.trim();
+  if (!dir) { showToast('Bitte ein Verzeichnis angeben', 'error'); return; }
+  API.post('/api/config/inbox-dir', { inbox_dir: dir }).then(function(data) {
+    if (data.ok) {
+      localStorage.setItem('inbox_dir', dir);
+      showToast('Inbox-Verzeichnis gespeichert', 'success');
+      var status = document.getElementById('inbox-dir-status');
+      if (status) status.innerHTML = 'Aktuell: <strong>' + dir + '</strong>';
+    } else {
+      showToast(data.error || 'Fehler', 'error');
+    }
+  }).catch(function(e) { showToast('Fehler: ' + e.message, 'error'); });
+}
+
+async function scanInboxDir() {
+  showToast('Scanne Verzeichnis...', 'info');
+  try {
+    var r = await API.post('/api/scan-inbox-dir', {});
+    if (r.ok) {
+      showToast(r.count + ' .eml-Datei(en) gefunden und importiert', 'success');
+      loadEmails();
+    } else {
+      showToast(r.error || 'Fehler beim Scannen', 'error');
+    }
+  } catch(e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
+}
+
+// --- POSTFACH MANAGEMENT ---
+function renderPostfaecher() {
+  var list = document.getElementById('postfaecher-list');
+  if (!list) return;
+  var postfaecher = getPostfaecher();
+  if (!postfaecher.length) {
+    list.innerHTML = '<p style="color:var(--text-dim);font-size:13px">Noch keine Postfaecher konfiguriert. Fuegen Sie unten Ihre E-Mail-Adressen hinzu.</p>';
+    return;
+  }
+  list.innerHTML = postfaecher.map(function(pf, i) {
+    return '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">' +
+      '<span style="width:12px;height:12px;border-radius:50%;background:' + pf.color + ';display:inline-block"></span>' +
+      '<strong>' + pf.label + '</strong>' +
+      '<span style="color:var(--text-dim)">' + pf.email + '</span>' +
+      '<button class="btn btn-danger btn-sm" style="margin-left:auto" onclick="removePostfach(' + i + ')">Entfernen</button>' +
+    '</div>';
+  }).join('');
+}
+
+function addPostfach() {
+  var email = document.getElementById('new-postfach-input').value.trim();
+  var label = document.getElementById('new-postfach-label').value.trim();
+  var color = document.getElementById('new-postfach-color').value;
+  if (!email) { showToast('Bitte E-Mail-Adresse eingeben', 'error'); return; }
+  if (!label) label = email.split('@')[0].toUpperCase();
+  var postfaecher = getPostfaecher();
+  // Duplikat pruefen
+  if (postfaecher.some(function(p) { return p.email.toLowerCase() === email.toLowerCase(); })) {
+    showToast('Postfach bereits vorhanden', 'error');
+    return;
+  }
+  postfaecher.push({ email: email, label: label, color: color });
+  localStorage.setItem('postfaecher', JSON.stringify(postfaecher));
+  document.getElementById('new-postfach-input').value = '';
+  document.getElementById('new-postfach-label').value = '';
+  renderPostfaecher();
+  updatePostfachFilter();
+  showToast('Postfach "' + label + '" hinzugefuegt', 'success');
+}
+
+function removePostfach(index) {
+  var postfaecher = getPostfaecher();
+  postfaecher.splice(index, 1);
+  localStorage.setItem('postfaecher', JSON.stringify(postfaecher));
+  renderPostfaecher();
+  updatePostfachFilter();
+  showToast('Postfach entfernt', 'success');
+}
+
 // --- Signaturen Cache ---
 var signaturenCache = null;
 async function loadSignaturen() {
@@ -862,6 +1133,7 @@ async function loadSignaturen() {
 
 // --- INIT ---
 window.addEventListener('load', function() {
+  updatePostfachFilter();
   loadEmails();
   startAutoRefresh();
   initDropZone();

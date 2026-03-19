@@ -68,6 +68,8 @@ class ProcessingResult:
             "processed_at": self.processed_at,
             "subject": self.parsed_email.subject,
             "from_addr": self.parsed_email.from_addr,
+            "to_addrs": self.parsed_email.to_addrs,
+            "cc_addrs": self.parsed_email.cc_addrs if hasattr(self.parsed_email, 'cc_addrs') else [],
             "date": format_datetime(self.parsed_email.date) if self.parsed_email.date else None,
             "classification": self.classification.to_dict() if self.classification else None,
             "thread_analysis": self.thread_analysis.to_dict() if self.thread_analysis else None,
