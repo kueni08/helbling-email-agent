@@ -636,6 +636,131 @@ def create_app(config: dict = None) -> Flask:
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
+    # ---- TEMPLATES (VORLAGEN) ----
+
+    templates_dir = resolve_path(config.get("drafts", {}).get("templates_dir", "./templates/drafts"))
+
+    @app.route("/api/templates")
+    def api_templates():
+        """Liste aller E-Mail-Vorlagen."""
+        templates = []
+        if not templates_dir.exists():
+            return jsonify(templates)
+        for f in sorted(templates_dir.glob("*.html")):
+            name = f.stem
+            # Typ-Erkennung aus Dateinamen
+            typ_map = {
+                "anfrage": "Anfrage", "angebot": "Angebot", "reklamation": "Reklamation",
+                "termin": "Termin", "nachfassen": "Nachfassen", "allgemein": "Allgemein",
+            }
+            typ = typ_map.get(name, "Benutzerdefiniert")
+            templates.append({
+                "name": name,
+                "filename": f.name,
+                "type": typ,
+                "size_kb": round(f.stat().st_size / 1024, 1),
+                "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%d.%m.%Y %H:%M"),
+            })
+        return jsonify(templates)
+
+    @app.route("/api/templates/<name>")
+    def api_template_detail(name):
+        """Gibt den Inhalt einer Vorlage zurück."""
+        tpl_path = templates_dir / f"{name}.html"
+        if not tpl_path.exists():
+            return jsonify({"error": "Vorlage nicht gefunden"}), 404
+        with open(tpl_path, encoding="utf-8") as f:
+            html = f.read()
+        return jsonify({"name": name, "html": html, "filename": f"{name}.html"})
+
+    @app.route("/api/templates/<name>", methods=["POST"])
+    def api_template_save(name):
+        """Speichert eine Vorlage (erstellen oder aktualisieren)."""
+        data = request.get_json() or {}
+        html = data.get("html", "")
+        if not html:
+            return jsonify({"error": "Kein HTML-Inhalt"}), 400
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        tpl_path = templates_dir / f"{name}.html"
+        with open(tpl_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        return jsonify({"ok": True, "name": name})
+
+    @app.route("/api/templates", methods=["POST"])
+    def api_template_create():
+        """Erstellt eine neue Vorlage."""
+        data = request.get_json() or {}
+        name = data.get("name", "").strip()
+        html = data.get("html", "")
+        if not name:
+            return jsonify({"error": "Kein Name angegeben"}), 400
+        # Sicherheit: nur alphanumerisch und Unterstriche
+        safe_name = "".join(c for c in name if c.isalnum() or c in ("_", "-"))
+        if not safe_name:
+            return jsonify({"error": "Ungültiger Name"}), 400
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        tpl_path = templates_dir / f"{safe_name}.html"
+        if tpl_path.exists():
+            return jsonify({"error": "Vorlage existiert bereits"}), 409
+        with open(tpl_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        return jsonify({"ok": True, "name": safe_name})
+
+    @app.route("/api/templates/<name>/delete", methods=["POST"])
+    def api_template_delete(name):
+        """Löscht eine Vorlage."""
+        tpl_path = templates_dir / f"{name}.html"
+        if tpl_path.exists():
+            tpl_path.unlink()
+        return jsonify({"ok": True})
+
+    # ---- INBOX DIRECTORY CONFIG ----
+
+    @app.route("/api/config/inbox-dir")
+    def api_inbox_dir():
+        """Gibt das aktuelle Inbox-Verzeichnis zurück."""
+        return jsonify({"inbox_dir": str(inbox_path)})
+
+    @app.route("/api/config/inbox-dir", methods=["POST"])
+    def api_inbox_dir_set():
+        """Setzt ein neues Inbox-Verzeichnis."""
+        data = request.get_json() or {}
+        new_dir = data.get("inbox_dir", "").strip()
+        if not new_dir:
+            return jsonify({"error": "Kein Verzeichnis angegeben"}), 400
+        new_path = Path(new_dir)
+        if not new_path.exists():
+            return jsonify({"error": f"Verzeichnis existiert nicht: {new_dir}"}), 400
+        if not new_path.is_dir():
+            return jsonify({"error": f"Kein Verzeichnis: {new_dir}"}), 400
+        # Update config in memory
+        config.setdefault("paths", {})["inbox"] = new_dir
+        nonlocal inbox_path
+        inbox_path = new_path
+        return jsonify({"ok": True, "inbox_dir": str(new_path)})
+
+    @app.route("/api/scan-inbox-dir", methods=["POST"])
+    def api_scan_inbox_dir():
+        """Scannt das Inbox-Verzeichnis und verarbeitet neue .eml-Dateien."""
+        try:
+            eml_files = list(inbox_path.glob("*.eml"))
+            if not eml_files:
+                return jsonify({"ok": True, "count": 0, "message": "Keine .eml-Dateien gefunden"})
+
+            from src.processor import Processor
+            processor = Processor(config)
+            results = []
+            for eml_file in eml_files:
+                try:
+                    result = processor.process_file(eml_file)
+                    if result:
+                        results.append(result)
+                except Exception:
+                    pass
+            return jsonify({"ok": True, "count": len(results)})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     # ---- PROCESSING ----
 
     @app.route("/api/process", methods=["POST"])
