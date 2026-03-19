@@ -9,22 +9,23 @@
 <body>
   <header class="app-header">
     <div class="header-left">
-      <span class="logo">⚙ Helbling</span>
+      <span class="logo">Helbling</span>
       <span class="subtitle">E-Mail-Verarbeitungssystem</span>
     </div>
     <div class="header-right">
       <span id="notification-badge" class="badge hidden">0</span>
-      <button class="btn btn-sm btn-primary" onclick="processAll()">▶ Inbox verarbeiten</button>
-      <span id="auto-refresh-indicator" class="dim">⟳ Auto-Refresh</span>
+      <button class="btn btn-sm btn-secondary" id="theme-toggle" onclick="toggleTheme()" title="Hell/Dunkel wechseln">&#9728;</button>
+      <button class="btn btn-sm btn-primary" onclick="processAll()">Inbox verarbeiten</button>
+      <span id="auto-refresh-indicator" class="dim">Auto-Refresh</span>
     </div>
   </header>
 
   <nav class="tab-nav">
-    <button class="tab-btn active" data-tab="inbox">📬 Inbox</button>
-    <button class="tab-btn" data-tab="drafts">✉ Entwürfe</button>
-    <button class="tab-btn" data-tab="tasks">📋 Aufgaben</button>
-    <button class="tab-btn" data-tab="knowledge">🗄 Wissensdatenbank</button>
-    <button class="tab-btn" data-tab="stats">📊 Statistik</button>
+    <button class="tab-btn active" data-tab="inbox">Inbox</button>
+    <button class="tab-btn" data-tab="drafts">Entwuerfe</button>
+    <button class="tab-btn" data-tab="tasks">Aufgaben</button>
+    <button class="tab-btn" data-tab="knowledge">Wissensdatenbank</button>
+    <button class="tab-btn" data-tab="stats">Statistik</button>
   </nav>
 
   <main class="content">
@@ -40,14 +41,24 @@
             <option value="FACETTESTAR">FACETTESTAR</option>
             <option value="ALLGEMEIN">Allgemein</option>
           </select>
+          <button class="btn btn-danger btn-sm" onclick="deleteAllEmails()">Alle loeschen</button>
         </div>
       </div>
+
+      <!-- Drag & Drop Zone -->
+      <div id="drop-zone" class="drop-zone" onclick="document.getElementById('eml-file-input').click()">
+        <div class="drop-zone-icon">+</div>
+        <div class="drop-zone-text">.eml-Dateien hier hineinziehen oder klicken zum Auswaehlen</div>
+        <div class="drop-zone-hint">Mehrere Dateien gleichzeitig moeglich</div>
+        <input type="file" id="eml-file-input" accept=".eml" multiple style="display:none" onchange="uploadEmlFiles(this.files)" />
+      </div>
+
       <div id="emails-table-container">
         <p class="loading">Lade E-Mails...</p>
       </div>
       <!-- Detail Panel -->
       <div id="email-detail-panel" class="detail-panel hidden">
-        <button class="close-btn" onclick="closePanel('email-detail-panel')">✕</button>
+        <button class="close-btn" onclick="closePanel('email-detail-panel')">x</button>
         <div id="email-detail-content"></div>
       </div>
     </section>
@@ -55,13 +66,16 @@
     <!-- TAB: DRAFTS -->
     <section id="tab-drafts" class="tab-content">
       <div class="section-header">
-        <h2>Antwortentwürfe</h2>
+        <h2>Antwortentwuerfe</h2>
+        <div class="filters">
+          <button class="btn btn-danger btn-sm" onclick="deleteAllDrafts()">Alle loeschen</button>
+        </div>
       </div>
       <div id="drafts-container">
-        <p class="loading">Lade Entwürfe...</p>
+        <p class="loading">Lade Entwuerfe...</p>
       </div>
       <div id="draft-detail-panel" class="detail-panel hidden">
-        <button class="close-btn" onclick="closePanel('draft-detail-panel')">✕</button>
+        <button class="close-btn" onclick="closePanel('draft-detail-panel')">x</button>
         <div id="draft-detail-content"></div>
       </div>
     </section>
@@ -83,13 +97,14 @@
             <option value="FACETTESTAR">FACETTESTAR</option>
             <option value="ALLGEMEIN">Allgemein</option>
           </select>
+          <button class="btn btn-danger btn-sm" onclick="deleteAllTasks()">Alle loeschen</button>
         </div>
       </div>
       <div id="tasks-container">
         <p class="loading">Lade Aufgaben...</p>
       </div>
       <div id="task-detail-panel" class="detail-panel hidden">
-        <button class="close-btn" onclick="closePanel('task-detail-panel')">✕</button>
+        <button class="close-btn" onclick="closePanel('task-detail-panel')">x</button>
         <div id="task-detail-content"></div>
       </div>
     </section>
@@ -99,8 +114,8 @@
       <div class="section-header">
         <h2>Wissensdatenbank</h2>
         <div class="actions">
-          <button class="btn btn-secondary" onclick="reloadKnowledge()">🔄 Neu laden</button>
-          <button class="btn btn-secondary" onclick="scrapeAll()">🌐 Web-Quellen aktualisieren</button>
+          <button class="btn btn-secondary" onclick="reloadKnowledge()">Neu laden</button>
+          <button class="btn btn-secondary" onclick="scrapeAll()">Web-Quellen aktualisieren</button>
         </div>
       </div>
       <div id="kb-status-container">
@@ -132,5 +147,20 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/static/js/app.js"></script>
+  <script>
+    (function() {
+      var saved = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', saved);
+      var btn = document.getElementById('theme-toggle');
+      if (btn) btn.innerHTML = saved === 'light' ? '&#9790;' : '&#9728;';
+    })();
+    function toggleTheme() {
+      var current = document.documentElement.getAttribute('data-theme') || 'dark';
+      var next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+      document.getElementById('theme-toggle').innerHTML = next === 'light' ? '&#9790;' : '&#9728;';
+    }
+  </script>
 </body>
 </html>

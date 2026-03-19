@@ -36,18 +36,19 @@ def create_app(config: dict = None) -> Flask:
     paths = config.get("paths", {})
     output_path = resolve_path(paths.get("output", "./output"))
     kb_path = resolve_path(paths.get("knowledge_base", "./knowledge_base"))
+    inbox_path = resolve_path(paths.get("inbox", "./inbox"))
 
     # ---- Hilfsfunktionen ----
 
     def get_all_results() -> list:
-        """Lädt alle verarbeiteten E-Mail-Ergebnisse (nur gültige Einträge)."""
+        """Lädt alle verarbeiteten E-Mail-Ergebnisse (nur gültige, nicht gelöschte)."""
         results_file = output_path / "logs" / "all_results.json"
         if not results_file.exists():
             return []
         try:
-            with open(results_file) as f:
+            with open(results_file, encoding="utf-8") as f:
                 data = json.load(f)
-            return [r for r in data if r.get("email_id")]
+            return [r for r in data if r.get("email_id") and not r.get("deleted")]
         except Exception:
             return []
 
@@ -59,7 +60,7 @@ def create_app(config: dict = None) -> Flask:
             return drafts
         for f in sorted(drafts_dir.glob("*_draft.json"), key=lambda x: x.stat().st_mtime, reverse=True):
             try:
-                with open(f) as fp:
+                with open(f, encoding="utf-8") as fp:
                     draft = json.load(fp)
                     draft["file_id"] = f.stem.replace("_draft", "")
                     drafts.append(draft)
@@ -75,7 +76,7 @@ def create_app(config: dict = None) -> Flask:
             return tasks
         for f in sorted(tasks_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
             try:
-                with open(f) as fp:
+                with open(f, encoding="utf-8") as fp:
                     task = json.load(fp)
                     tasks.append(task)
             except Exception:
@@ -100,10 +101,10 @@ def create_app(config: dict = None) -> Flask:
         for f in sorted(kb_path.rglob("*")):
             if not f.is_file() or f.name.startswith("."):
                 continue
-            if f.suffix.lower() not in (".md", ".txt", ".csv", ".json", ".pdf", ".xlsx"):
+            if f.suffix.lower() not in (".md", ".txt", ".csv", ".json", ".pdf", ".xlsx",
+                                         ".docx", ".pptx", ".png"):
                 continue
             rel = f.relative_to(kb_path)
-            # Kategorie aus Pfad
             parts = rel.parts
             cat = "allgemein"
             if any("sibox" in p.lower() for p in parts):
@@ -127,6 +128,33 @@ def create_app(config: dict = None) -> Flask:
     def index():
         return render_template("index.html")
 
+    # ---- CONFIG / PIPELINE / SIGNATUREN ----
+
+    @app.route("/api/config/pipeline")
+    def api_pipeline_config():
+        """Gibt die Pipeline-Konfiguration zurück."""
+        pipeline = config.get("pipeline", {})
+        return jsonify(pipeline)
+
+    @app.route("/api/config/signaturen")
+    def api_signaturen():
+        """Gibt alle verfügbaren Signaturen zurück."""
+        drafts_cfg = config.get("drafts", {})
+        signaturen = drafts_cfg.get("signaturen", {})
+        result = {}
+        for key, sig in signaturen.items():
+            result[key] = {
+                "name": sig.get("name", key),
+                "html": sig.get("html", ""),
+            }
+        return jsonify({
+            "signaturen": result,
+            "default": drafts_cfg.get("default_signatur", "standard"),
+            "bereich_mapping": drafts_cfg.get("bereich_signatur_mapping", {}),
+        })
+
+    # ---- STATS ----
+
     @app.route("/api/stats")
     def api_stats():
         """Statistik-Daten."""
@@ -134,7 +162,6 @@ def create_app(config: dict = None) -> Flask:
         tasks = get_all_tasks()
         drafts = get_all_drafts()
 
-        # Nach Bereich
         by_bereich = {}
         by_aktionstyp = {}
         today_count = 0
@@ -152,7 +179,6 @@ def create_app(config: dict = None) -> Flask:
         open_tasks = [t for t in tasks if t.get("status") == "offen"]
         high_prio = [t for t in open_tasks if t.get("prioritaet") == "hoch"]
 
-        # Feedback-Statistiken
         feedback_gut = sum(1 for d in drafts if d.get("feedback_rating") == "gut")
         feedback_schlecht = sum(1 for d in drafts if d.get("feedback_rating") == "schlecht")
         drafts_with_markers = sum(1 for d in drafts if d.get("has_check_markers"))
@@ -171,6 +197,8 @@ def create_app(config: dict = None) -> Flask:
             "drafts_with_markers": drafts_with_markers,
         })
 
+    # ---- EMAILS ----
+
     @app.route("/api/emails")
     def api_emails():
         """Liste verarbeiteter E-Mails."""
@@ -181,75 +209,133 @@ def create_app(config: dict = None) -> Flask:
     def api_email_detail(email_id):
         """Detail einer verarbeiteten E-Mail."""
         result_path = output_path / "logs" / f"{email_id}.json"
-        if not result_path.exists():
-            return jsonify({"error": "Nicht gefunden"}), 404
-        with open(result_path) as f:
-            return jsonify(json.load(f))
+        if result_path.exists():
+            with open(result_path, encoding="utf-8") as f:
+                return jsonify(json.load(f))
+        for r in get_all_results():
+            if r.get("email_id") == email_id:
+                return jsonify(r)
+        return jsonify({"error": "Nicht gefunden"}), 404
 
     @app.route("/api/emails/<email_id>/delete", methods=["POST"])
     def api_email_delete(email_id):
-        """Löscht eine verarbeitete E-Mail (Soft-Delete + .eml in gelöscht-Ordner)."""
-        # 1. Individuelle Ergebnis-JSON als gelöscht markieren
+        """Löscht eine verarbeitete E-Mail (Hard-Delete aus Listen, Dateien verschieben)."""
+        # 1. Individuelle Ergebnis-JSON löschen
         result_path = output_path / "logs" / f"{email_id}.json"
         if result_path.exists():
-            with open(result_path) as f:
-                result = json.load(f)
-            result["deleted"] = True
-            result["deleted_at"] = datetime.now().isoformat()
-            with open(result_path, "w") as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
+            result_path.unlink()
 
-        # 2. all_results.json aktualisieren
+        # 2. Aus all_results.json entfernen
         results_file = output_path / "logs" / "all_results.json"
         if results_file.exists():
             try:
-                with open(results_file) as f:
+                with open(results_file, encoding="utf-8") as f:
                     all_results = json.load(f)
-                for r in all_results:
-                    if r.get("email_id") == email_id:
-                        r["deleted"] = True
-                        r["deleted_at"] = datetime.now().isoformat()
-                with open(results_file, "w") as f:
+                all_results = [r for r in all_results if r.get("email_id") != email_id]
+                with open(results_file, "w", encoding="utf-8") as f:
                     json.dump(all_results, f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
 
-        # 3. .eml-Datei in inbox/gelöscht/ verschieben
+        # 3. Draft-Dateien löschen
+        for ext in ("_draft.json", "_draft.html", "_draft.md"):
+            p = output_path / "drafts" / f"{email_id}{ext}"
+            if p.exists():
+                p.unlink()
+
+        # 4. .eml-Datei verschieben
+        _move_eml_to_deleted(email_id)
+
+        # 5. Aus processed_emails.json entfernen
         processed_log = output_path / "logs" / "processed_emails.json"
-        eml_moved = False
         if processed_log.exists():
             try:
-                with open(processed_log) as f:
+                with open(processed_log, encoding="utf-8") as f:
+                    log = json.load(f)
+                log.pop(email_id, None)
+                with open(processed_log, "w", encoding="utf-8") as f:
+                    json.dump(log, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+        return jsonify({"ok": True, "email_id": email_id})
+
+    @app.route("/api/emails/delete-all", methods=["POST"])
+    def api_emails_delete_all():
+        """Löscht alle verarbeiteten E-Mails."""
+        results = get_all_results()
+        count = 0
+        for r in results:
+            eid = r.get("email_id")
+            if eid:
+                # Individuelle JSON löschen
+                p = output_path / "logs" / f"{eid}.json"
+                if p.exists():
+                    p.unlink()
+                # Draft-Dateien löschen
+                for ext in ("_draft.json", "_draft.html", "_draft.md"):
+                    dp = output_path / "drafts" / f"{eid}{ext}"
+                    if dp.exists():
+                        dp.unlink()
+                count += 1
+
+        # all_results.json leeren
+        results_file = output_path / "logs" / "all_results.json"
+        if results_file.exists():
+            with open(results_file, "w", encoding="utf-8") as f:
+                json.dump([], f)
+
+        # processed_emails.json leeren
+        processed_log = output_path / "logs" / "processed_emails.json"
+        if processed_log.exists():
+            with open(processed_log, "w", encoding="utf-8") as f:
+                json.dump({}, f)
+
+        # Alle Tasks löschen
+        tasks_dir = output_path / "tasks"
+        if tasks_dir.exists():
+            for f in tasks_dir.glob("*.json"):
+                f.unlink()
+            for f in tasks_dir.glob("*.md"):
+                f.unlink()
+
+        return jsonify({"ok": True, "deleted": count})
+
+    def _move_eml_to_deleted(email_id):
+        """Verschiebt die .eml-Datei in den gelöscht-Ordner."""
+        processed_log = output_path / "logs" / "processed_emails.json"
+        if processed_log.exists():
+            try:
+                with open(processed_log, encoding="utf-8") as f:
                     log = json.load(f)
                 entry = log.get(email_id, {})
                 eml_path = Path(entry.get("file", ""))
                 if eml_path.exists():
-                    geloescht_dir = inbox_path / "gelöscht"
+                    geloescht_dir = inbox_path / "geloescht"
                     geloescht_dir.mkdir(exist_ok=True)
                     dest = geloescht_dir / eml_path.name
                     if dest.exists():
                         dest = geloescht_dir / f"{eml_path.stem}_{email_id[:8]}{eml_path.suffix}"
                     shutil.move(str(eml_path), str(dest))
-                    eml_moved = True
+                    return
             except Exception:
                 pass
 
-        # Auch in erfasst/ suchen falls noch nicht verschoben
-        if not eml_moved:
-            erfasst_dir = inbox_path / "erfasst"
-            if erfasst_dir.exists():
-                for eml_file in erfasst_dir.glob("*.eml"):
-                    from src.utils import get_email_id
-                    if get_email_id(str(eml_file)) == email_id:
-                        geloescht_dir = inbox_path / "gelöscht"
-                        geloescht_dir.mkdir(exist_ok=True)
-                        dest = geloescht_dir / eml_file.name
-                        if dest.exists():
-                            dest = geloescht_dir / f"{eml_file.stem}_{email_id[:8]}{eml_file.suffix}"
-                        shutil.move(str(eml_file), str(dest))
-                        break
+        # Auch in erfasst/ suchen
+        erfasst_dir = inbox_path / "erfasst"
+        if erfasst_dir.exists():
+            from src.utils import get_email_id
+            for eml_file in erfasst_dir.glob("*.eml"):
+                if get_email_id(str(eml_file)) == email_id:
+                    geloescht_dir = inbox_path / "geloescht"
+                    geloescht_dir.mkdir(exist_ok=True)
+                    dest = geloescht_dir / eml_file.name
+                    if dest.exists():
+                        dest = geloescht_dir / f"{eml_file.stem}_{email_id[:8]}{eml_file.suffix}"
+                    shutil.move(str(eml_file), str(dest))
+                    break
 
-        return jsonify({"ok": True, "email_id": email_id})
+    # ---- DRAFTS ----
 
     @app.route("/api/drafts")
     def api_drafts():
@@ -262,8 +348,23 @@ def create_app(config: dict = None) -> Flask:
         draft_path = output_path / "drafts" / f"{file_id}_draft.json"
         if not draft_path.exists():
             return jsonify({"error": "Nicht gefunden"}), 404
-        with open(draft_path) as f:
+        with open(draft_path, encoding="utf-8") as f:
             return jsonify(json.load(f))
+
+    @app.route("/api/drafts/<file_id>/html")
+    def api_draft_html(file_id):
+        """Gibt den HTML-Entwurf zurück."""
+        html_path = output_path / "drafts" / f"{file_id}_draft.html"
+        if not html_path.exists():
+            # Fallback: HTML aus JSON
+            draft_path = output_path / "drafts" / f"{file_id}_draft.json"
+            if draft_path.exists():
+                with open(draft_path, encoding="utf-8") as f:
+                    draft = json.load(f)
+                return jsonify({"html": draft.get("draft_html", draft.get("draft_text", ""))})
+            return jsonify({"error": "Nicht gefunden"}), 404
+        with open(html_path, encoding="utf-8") as f:
+            return jsonify({"html": f.read()})
 
     @app.route("/api/drafts/<file_id>/text")
     def api_draft_text(file_id):
@@ -271,38 +372,35 @@ def create_app(config: dict = None) -> Flask:
         md_path = output_path / "drafts" / f"{file_id}_draft.md"
         if not md_path.exists():
             return jsonify({"error": "Nicht gefunden"}), 404
-        with open(md_path) as f:
+        with open(md_path, encoding="utf-8") as f:
             return jsonify({"text": f.read()})
 
     @app.route("/api/drafts/<file_id>/feedback", methods=["POST"])
     def api_draft_feedback(file_id):
-        """Speichert Feedback zu einem Entwurf (gut/schlecht + optionaler Kommentar)."""
+        """Speichert Feedback zu einem Entwurf."""
         draft_path = output_path / "drafts" / f"{file_id}_draft.json"
         if not draft_path.exists():
             return jsonify({"error": "Nicht gefunden"}), 404
         data = request.get_json() or {}
-        rating = data.get("rating")   # "gut" | "schlecht" | "neutral"
+        rating = data.get("rating")
         comment = data.get("comment", "")
-        edited_text = data.get("edited_text", "")
 
-        with open(draft_path) as f:
+        with open(draft_path, encoding="utf-8") as f:
             draft = json.load(f)
 
         draft["feedback_rating"] = rating
         draft["feedback_comment"] = comment
         draft["feedback_at"] = datetime.now().isoformat()
-        if edited_text:
-            draft["draft_text_edited"] = edited_text
 
-        with open(draft_path, "w") as f:
+        with open(draft_path, "w", encoding="utf-8") as f:
             json.dump(draft, f, ensure_ascii=False, indent=2)
 
-        # Feedback-Log aktualisieren
+        # Feedback-Log
         feedback_log = output_path / "logs" / "draft_feedback.json"
         log_entries = []
         if feedback_log.exists():
             try:
-                with open(feedback_log) as f:
+                with open(feedback_log, encoding="utf-8") as f:
                     log_entries = json.load(f)
             except Exception:
                 pass
@@ -314,42 +412,121 @@ def create_app(config: dict = None) -> Flask:
             "bereich": draft.get("classification_bereich"),
             "aktionstyp": draft.get("classification_aktionstyp"),
         })
-        with open(feedback_log, "w") as f:
+        with open(feedback_log, "w", encoding="utf-8") as f:
             json.dump(log_entries, f, ensure_ascii=False, indent=2)
 
         return jsonify({"ok": True})
 
     @app.route("/api/drafts/<file_id>/edit", methods=["POST"])
     def api_draft_edit(file_id):
-        """Speichert einen manuell bearbeiteten Entwurf."""
+        """Speichert einen manuell bearbeiteten Entwurf (HTML)."""
         draft_path = output_path / "drafts" / f"{file_id}_draft.json"
         if not draft_path.exists():
             return jsonify({"error": "Nicht gefunden"}), 404
         data = request.get_json() or {}
-        new_text = data.get("text", "")
-        if not new_text:
-            return jsonify({"error": "Kein Text"}), 400
+        new_html = data.get("html", "")
+        new_signatur = data.get("signatur_key", "")
+        if not new_html:
+            return jsonify({"error": "Kein HTML"}), 400
 
-        with open(draft_path) as f:
+        with open(draft_path, encoding="utf-8") as f:
             draft = json.load(f)
-        draft["draft_text_edited"] = new_text
+        draft["draft_html_edited"] = new_html
         draft["edited_at"] = datetime.now().isoformat()
-        with open(draft_path, "w") as f:
+        if new_signatur:
+            draft["signatur_key"] = new_signatur
+
+        with open(draft_path, "w", encoding="utf-8") as f:
             json.dump(draft, f, ensure_ascii=False, indent=2)
 
-        # Auch .md aktualisieren
-        md_path = output_path / "drafts" / f"{file_id}_draft.md"
-        if md_path.exists():
-            with open(md_path) as f:
-                existing = f.read()
-            # Alten Entwurfstext ersetzen
-            separator = "\n\n---\n\n"
-            if separator in existing:
-                header = existing.split(separator)[0]
-                with open(md_path, "w") as f:
-                    f.write(header + separator + new_text)
+        # HTML-Datei aktualisieren
+        html_path = output_path / "drafts" / f"{file_id}_draft.html"
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(new_html)
 
         return jsonify({"ok": True})
+
+    @app.route("/api/drafts/<file_id>/refine", methods=["POST"])
+    def api_draft_refine(file_id):
+        """Verfeinert einen Entwurf via Claude API."""
+        draft_path = output_path / "drafts" / f"{file_id}_draft.json"
+        if not draft_path.exists():
+            return jsonify({"error": "Nicht gefunden"}), 404
+
+        data = request.get_json() or {}
+        instruction = data.get("instruction", "")
+        current_html = data.get("current_html", "")
+
+        if not instruction:
+            return jsonify({"error": "Keine Anweisung"}), 400
+
+        # Aktuellen HTML laden falls nicht mitgegeben
+        if not current_html:
+            html_path = output_path / "drafts" / f"{file_id}_draft.html"
+            if html_path.exists():
+                with open(html_path, encoding="utf-8") as f:
+                    current_html = f.read()
+            else:
+                with open(draft_path, encoding="utf-8") as f:
+                    draft = json.load(f)
+                current_html = draft.get("draft_html_edited", draft.get("draft_html", draft.get("draft_text", "")))
+
+        try:
+            from src.api_client import APIClient
+            from src.drafter import Drafter
+            from src.knowledge import KnowledgeBase
+
+            api = APIClient(config)
+            kb = KnowledgeBase(config)
+            drafter = Drafter(api, kb, config)
+            refined_html = drafter.refine_draft(current_html, instruction)
+
+            # Verfeinerung speichern
+            with open(draft_path, encoding="utf-8") as f:
+                draft = json.load(f)
+
+            if "refinement_history" not in draft:
+                draft["refinement_history"] = []
+            draft["refinement_history"].append({
+                "instruction": instruction,
+                "timestamp": datetime.now().isoformat(),
+            })
+            draft["draft_html_edited"] = refined_html
+            draft["edited_at"] = datetime.now().isoformat()
+
+            with open(draft_path, "w", encoding="utf-8") as f:
+                json.dump(draft, f, ensure_ascii=False, indent=2)
+
+            # HTML-Datei aktualisieren
+            html_path = output_path / "drafts" / f"{file_id}_draft.html"
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(refined_html)
+
+            return jsonify({"ok": True, "refined_html": refined_html})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/drafts/<file_id>/delete", methods=["POST"])
+    def api_draft_delete(file_id):
+        """Löscht einen einzelnen Entwurf."""
+        for ext in ("_draft.json", "_draft.html", "_draft.md"):
+            p = output_path / "drafts" / f"{file_id}{ext}"
+            if p.exists():
+                p.unlink()
+        return jsonify({"ok": True})
+
+    @app.route("/api/drafts/delete-all", methods=["POST"])
+    def api_drafts_delete_all():
+        """Löscht alle Entwürfe."""
+        drafts_dir = output_path / "drafts"
+        count = 0
+        if drafts_dir.exists():
+            for f in drafts_dir.glob("*_draft.*"):
+                f.unlink()
+                count += 1
+        return jsonify({"ok": True, "deleted": count})
+
+    # ---- TASKS ----
 
     @app.route("/api/tasks")
     def api_tasks():
@@ -369,7 +546,7 @@ def create_app(config: dict = None) -> Flask:
         task_path = output_path / "tasks" / f"{task_id}.json"
         if not task_path.exists():
             return jsonify({"error": "Nicht gefunden"}), 404
-        with open(task_path) as f:
+        with open(task_path, encoding="utf-8") as f:
             return jsonify(json.load(f))
 
     @app.route("/api/tasks/<task_id>/status", methods=["POST"])
@@ -380,12 +557,35 @@ def create_app(config: dict = None) -> Flask:
             return jsonify({"error": "Nicht gefunden"}), 404
         data = request.get_json()
         new_status = data.get("status", "offen")
-        with open(task_path) as f:
+        with open(task_path, encoding="utf-8") as f:
             task = json.load(f)
         task["status"] = new_status
-        with open(task_path, "w") as f:
+        with open(task_path, "w", encoding="utf-8") as f:
             json.dump(task, f, ensure_ascii=False, indent=2)
         return jsonify({"ok": True, "status": new_status})
+
+    @app.route("/api/tasks/<task_id>/delete", methods=["POST"])
+    def api_task_delete(task_id):
+        """Löscht eine einzelne Aufgabe."""
+        for ext in (".json", ".md"):
+            p = output_path / "tasks" / f"{task_id}{ext}"
+            if p.exists():
+                p.unlink()
+        return jsonify({"ok": True})
+
+    @app.route("/api/tasks/delete-all", methods=["POST"])
+    def api_tasks_delete_all():
+        """Löscht alle Aufgaben."""
+        tasks_dir = output_path / "tasks"
+        count = 0
+        if tasks_dir.exists():
+            for f in tasks_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+                    count += 1
+        return jsonify({"ok": True, "deleted": count})
+
+    # ---- KNOWLEDGE ----
 
     @app.route("/api/knowledge/status")
     def api_knowledge_status():
@@ -436,6 +636,8 @@ def create_app(config: dict = None) -> Flask:
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
+    # ---- PROCESSING ----
+
     @app.route("/api/process", methods=["POST"])
     def api_process():
         """Verarbeitet alle E-Mails im Inbox."""
@@ -449,8 +651,6 @@ def create_app(config: dict = None) -> Flask:
             })
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-
-    inbox_path = resolve_path(paths.get("inbox", "./inbox"))
 
     @app.route("/api/upload", methods=["POST"])
     def api_upload():
@@ -467,7 +667,6 @@ def create_app(config: dict = None) -> Flask:
                 errors.append(f"{name}: Nur .eml-Dateien erlaubt")
                 continue
             dest = inbox_path / name
-            # Bei Namenskonflikt Suffix anhängen
             counter = 1
             while dest.exists():
                 stem = Path(name).stem
@@ -479,7 +678,6 @@ def create_app(config: dict = None) -> Flask:
         if not saved:
             return jsonify({"error": "; ".join(errors)}), 400
 
-        # Sofort verarbeiten
         results = []
         try:
             from src.processor import Processor

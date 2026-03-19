@@ -159,15 +159,6 @@ class EmlParser:
         # Body extrahieren
         body_plain, body_html = self._extract_body(msg)
 
-        # Fallback: Betreff aus Dateiname wenn Header leer
-        if not subject:
-            stem = re.sub(r"^WG[_\s:]+|^AW[_\s:]+|^FW[_\s:]+", "", Path(file_path).stem, flags=re.IGNORECASE).strip()
-            subject = re.sub(r"_", " ", stem).strip()
-        # Fallback: Absender aus Thread-Nachrichten
-        if not from_addr:
-            hm = re.search(r"(?:Von|From)[:\s]+([^\n<]+(?:<[^>]+>)?)", body_plain, re.IGNORECASE)
-            if hm: from_addr = hm.group(1).strip()
-
         # Anhänge extrahieren
         attachments = self._extract_attachments(msg)
 
@@ -287,16 +278,7 @@ class EmlParser:
         body_html = "\n".join(html_parts) if html_parts else None
 
         if plain_parts:
-            raw = "\n".join(plain_parts)
-            # HTML-Inhalt in text/plain-Part erkennen
-            if raw.lstrip().lower().startswith(('<html', '<!doctype')):
-                body_html = body_html or raw
-                soup = BeautifulSoup(raw, 'html.parser')
-                for tag in soup.find_all(['p','div','br','li','tr']):
-                    tag.insert_before('\n')
-                body_plain = re.sub(r'\n{3,}', '\n\n', soup.get_text()).strip()
-            else:
-                body_plain = raw
+            body_plain = "\n".join(plain_parts)
         elif body_html:
             # HTML → Plain Text konvertieren
             soup = BeautifulSoup(body_html, "html.parser")

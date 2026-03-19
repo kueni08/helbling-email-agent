@@ -62,17 +62,104 @@ tasks:
 
 # Entwürfe
 drafts:
-  signatur: |
-    Freundliche Grüsse
-
-    Helbling & Co. AG
-    Werkstrasse 18
-    8645 Rapperswil-Jona
-    Tel. +41 55 225 55 00
-    info@helbling.ch
-    www.helbling.ch
+  templates_dir: "./templates/drafts"
+  format: "html"
   sprache: "de-CH"
   stil: "professionell-freundlich"
+  default_signatur: "standard"
+  signaturen:
+    standard:
+      name: "Helbling & Co. AG"
+      text: |
+        Freundliche Grüsse
+
+        Helbling & Co. AG
+        Werkstrasse 18
+        8645 Rapperswil-Jona
+        Tel. +41 55 225 55 00
+        info@helbling.ch
+        www.helbling.ch
+      html: |
+        <p>Freundliche Grüsse</p>
+        <p><strong>Helbling &amp; Co. AG</strong><br>
+        Werkstrasse 18<br>
+        8645 Rapperswil-Jona<br>
+        Tel. +41 55 225 55 00<br>
+        <a href="mailto:info@helbling.ch">info@helbling.ch</a><br>
+        <a href="https://www.helbling.ch">www.helbling.ch</a></p>
+    sibox:
+      name: "SIBOX – Helbling & Co. AG"
+      text: |
+        Freundliche Grüsse
+
+        SIBOX – Helbling & Co. AG
+        Werkstrasse 18
+        8645 Rapperswil-Jona
+        Tel. +41 55 225 55 00
+        sibox@helbling.ch
+        www.sibox.ch
+      html: |
+        <p>Freundliche Grüsse</p>
+        <p><strong>SIBOX – Helbling &amp; Co. AG</strong><br>
+        Werkstrasse 18<br>
+        8645 Rapperswil-Jona<br>
+        Tel. +41 55 225 55 00<br>
+        <a href="mailto:sibox@helbling.ch">sibox@helbling.ch</a><br>
+        <a href="https://www.sibox.ch">www.sibox.ch</a></p>
+    facettestar:
+      name: "FACETTESTAR – Helbling & Co. AG"
+      text: |
+        Freundliche Grüsse
+
+        FACETTESTAR – Helbling & Co. AG
+        Werkstrasse 18
+        8645 Rapperswil-Jona
+        Tel. +41 55 225 55 00
+        facettestar@helbling.ch
+        www.facettestar.ch
+      html: |
+        <p>Freundliche Grüsse</p>
+        <p><strong>FACETTESTAR – Helbling &amp; Co. AG</strong><br>
+        Werkstrasse 18<br>
+        8645 Rapperswil-Jona<br>
+        Tel. +41 55 225 55 00<br>
+        <a href="mailto:facettestar@helbling.ch">facettestar@helbling.ch</a><br>
+        <a href="https://www.facettestar.ch">www.facettestar.ch</a></p>
+  # Mapping: Bereich → Signatur (automatische Vorauswahl)
+  bereich_signatur_mapping:
+    SIBOX: "sibox"
+    FACETTESTAR: "facettestar"
+    ALLGEMEIN: "standard"
+
+# Verarbeitungs-Pipeline
+pipeline:
+  steps:
+    - name: "parse"
+      label: "Parsen"
+      description: "E-Mail parsen (Header, Body, Anhänge)"
+      module: "eml_parser"
+    - name: "thread_analyze"
+      label: "Thread"
+      description: "Thread-Verlauf analysieren"
+      module: "thread_analyzer"
+    - name: "classify"
+      label: "Klassifikation"
+      description: "Bereich & Aktionstyp bestimmen"
+      module: "classifier"
+    - name: "knowledge"
+      label: "Wissen"
+      description: "Relevante Wissensbasis-Einträge suchen"
+      module: "knowledge"
+    - name: "draft"
+      label: "Entwurf"
+      description: "Antwortentwurf generieren (HTML)"
+      module: "drafter"
+      condition: "benoetigt_antwort"
+    - name: "task"
+      label: "Aufgabe"
+      description: "Aufgabe erstellen"
+      module: "tasker"
+      condition: "benoetigt_aufgabe"
 
 # Web-Scraping
 web_sources:

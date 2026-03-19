@@ -51,6 +51,16 @@ class ProcessingResult:
         self.error = error
         self.processed_at = datetime.now().isoformat()
 
+        self.pipeline_steps = {}
+
+    def _step(self, name: str, status: str, detail: str = ""):
+        """Protokolliert einen Pipeline-Schritt."""
+        self.pipeline_steps[name] = {
+            "status": status,
+            "detail": detail,
+            "timestamp": datetime.now().isoformat(),
+        }
+
     def to_dict(self) -> dict:
         return {
             "email_id": self.email_id,
@@ -66,6 +76,7 @@ class ProcessingResult:
             "task_generated": self.task is not None,
             "task_id": self.task.id if self.task else None,
             "task_file": None,
+            "pipeline_steps": self.pipeline_steps,
             "error": self.error,
         }
 
@@ -114,11 +125,19 @@ class Processor:
             logger.info(f"E-Mail bereits verarbeitet, überspringe: {email_id}")
             return None
 
+        # Pipeline-Schritte protokollieren
+        pipeline = {}
+
+        def step(name, status, detail=""):
+            pipeline[name] = {"status": status, "detail": detail, "timestamp": datetime.now().isoformat()}
+
         # Schritt 1: Parsen
         try:
             parsed = self.parser.parse(str(file_path))
             parsed.email_id = email_id
+            step("parse", "ok", f"Betreff: {parsed.subject}")
         except Exception as e:
+            step("parse", "error", str(e))
             logger.error(f"Parsing fehlgeschlagen: {e}")
             raise
 
@@ -132,16 +151,20 @@ class Processor:
         # Schritt 3: Thread analysieren
         try:
             thread_analysis = self.thread_analyzer.analyze(parsed)
+            step("thread_analyze", "ok", f"{thread_analysis.anzahl_nachrichten} Nachricht(en)")
         except Exception as e:
             logger.warning(f"Thread-Analyse fehlgeschlagen: {e}")
             thread_analysis = self.thread_analyzer._simple_analysis(parsed)
+            step("thread_analyze", "fallback", str(e))
 
         # Schritt 4: Klassifizieren
         try:
             classification = self.classifier.classify(parsed, thread_analysis)
+            step("classify", "ok", f"{classification.bereich} / {classification.aktionstyp}")
         except Exception as e:
             logger.warning(f"Klassifikation fehlgeschlagen: {e}")
             classification = self.classifier._keyword_classify(parsed)
+            step("classify", "fallback", str(e))
 
         # Schritt 5: Wissensabruf
         query = (
@@ -153,6 +176,7 @@ class Processor:
             top_k=5,
             category=classification.bereich.lower(),
         )
+        step("knowledge", "ok", f"{len(knowledge_chunks)} Chunks gefunden")
 
         # Schritt 6: Entwurf generieren
         draft = None
@@ -163,8 +187,12 @@ class Processor:
                     parsed, thread_analysis, classification, knowledge_chunks
                 )
                 draft_file = self._save_draft(draft, email_id)
+                step("draft", "ok", f"Template: {draft.template_used}, Signatur: {draft.signatur_key}")
             except Exception as e:
+                step("draft", "error", str(e))
                 logger.error(f"Entwurf-Generierung fehlgeschlagen: {e}")
+        else:
+            step("draft", "skipped", "Keine Antwort benötigt")
 
         # Schritt 7: Aufgabe erstellen
         task = None
@@ -175,8 +203,12 @@ class Processor:
                     parsed, thread_analysis, classification
                 )
                 task_file = self._save_task(task, email_id)
+                step("task", "ok", f"ID: {task.id}")
             except Exception as e:
+                step("task", "error", str(e))
                 logger.error(f"Aufgaben-Erstellung fehlgeschlagen: {e}")
+        else:
+            step("task", "skipped", "Keine Aufgabe benötigt")
 
         # Schritt 8: Ergebnis erstellen und speichern
         result = ProcessingResult(
@@ -190,6 +222,7 @@ class Processor:
         )
 
         result_dict = result.to_dict()
+        result_dict["pipeline_steps"] = pipeline
         if draft_file:
             result_dict["draft_file"] = str(draft_file)
         if task_file:
@@ -229,11 +262,15 @@ class Processor:
         return results
 
     def _save_draft(self, draft: DraftResult, email_id: str) -> Path:
-        """Speichert einen Antwortentwurf."""
+        """Speichert einen Antwortentwurf (HTML + Markdown + JSON)."""
         drafts_dir = self.output_path / "drafts"
         drafts_dir.mkdir(exist_ok=True)
 
-        # Entwurf als Markdown
+        # Entwurf als HTML
+        html_path = drafts_dir / f"{email_id}_draft.html"
+        save_text(draft.draft_html, str(html_path))
+
+        # Entwurf als Markdown (Plain Text)
         md_path = drafts_dir / f"{email_id}_draft.md"
         md_content = (
             f"# Antwortentwurf\n\n"
@@ -241,8 +278,9 @@ class Processor:
             f"**Betreff:** {draft.subject}\n"
             f"**Bereich:** {draft.classification_bereich}\n"
             f"**Typ:** {draft.classification_aktionstyp}\n"
-            f"**Wissensdatenbank-Quellen:** {', '.join(draft.used_knowledge_sources) or 'keine'}\n"
-            f"{'⚠️ Enthält [PRÜFEN: ...] Markierungen' if draft.has_check_markers else '✅ Kein manueller Check nötig'}\n\n"
+            f"**Template:** {draft.template_used}\n"
+            f"**Signatur:** {draft.signatur_key}\n"
+            f"**Wissensdatenbank-Quellen:** {', '.join(draft.used_knowledge_sources) or 'keine'}\n\n"
             f"---\n\n"
             f"{draft.draft_text}"
         )
@@ -252,7 +290,7 @@ class Processor:
         json_path = drafts_dir / f"{email_id}_draft.json"
         save_json(draft.to_dict(), str(json_path))
 
-        return md_path
+        return html_path
 
     def _save_task(self, task: Task, email_id: str) -> Path:
         """Speichert eine Aufgabe."""
