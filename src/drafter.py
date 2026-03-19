@@ -1,10 +1,11 @@
 """
 Antwortentwurf-Generator für das Helbling E-Mail-Verarbeitungssystem.
-Generiert professionelle Antwortentwürfe auf Schweizer Hochdeutsch.
+Generiert professionelle Antwortentwürfe auf Schweizer Hochdeutsch als HTML.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from .api_client import APIClient
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 DRAFT_PROMPT = """\
 Du bist der E-Mail-Assistent von Helbling & Co. AG, Rapperswil-Jona.
 Erstelle einen professionellen Antwortentwurf auf Deutsch (Schweizer Hochdeutsch, kein ß).
+
+WICHTIG: Gib den Antwortinhalt als HTML zurück. Verwende <p>-Tags für Absätze,
+<strong> für Hervorhebungen, <ul>/<li> für Listen. Keine vollständige HTML-Seite,
+nur den Body-Inhalt (ohne <html>, <head>, <body>-Tags).
+Die Anrede und der Gruss werden separat eingefügt — schreibe NUR den Hauptinhalt.
 
 ## Thread-Verlauf & Analyse:
 {thread_context}
@@ -50,19 +56,48 @@ Anhänge: {attachment_info}
 - Dringlichkeit: {dringlichkeit}
 
 ## Regeln für den Entwurf:
-1. Anrede: "Sehr geehrte/r [Name]," — oder passend zur Tonalität im Verlauf
-2. Gruss: "{signatur}"
-3. Bei Preisangaben: NUR Preise aus der Wissensdatenbank verwenden — bei unbekannten Preisen "[PRÜFEN: Preis]" schreiben
-4. Bei Unsicherheiten: Rückfrage formulieren statt falsche Informationen geben
-5. Markiere manuell zu prüfende Stellen mit [PRÜFEN: ...]
-6. Beziehe dich auf den Verlauf wenn relevant (z.B. "Wie besprochen..." / "Bezugnehmend auf...")
-7. Wiederhole KEINE Informationen die bereits im Verlauf gegeben wurden
-8. Wenn Anhänge vorhanden: kurz erwähnen wo sinnvoll
-9. KEIN "ß" — schreibe immer "ss"
-10. Kurz und präzise — keine unnötigen Floskeln
+1. Bei Preisangaben: NUR Preise aus der Wissensdatenbank verwenden — bei unbekannten Preisen "[PRÜFEN: Preis]" schreiben
+2. Bei Unsicherheiten: Rückfrage formulieren statt falsche Informationen geben
+3. Markiere manuell zu prüfende Stellen mit [PRÜFEN: ...]
+4. Beziehe dich auf den Verlauf wenn relevant (z.B. "Wie besprochen..." / "Bezugnehmend auf...")
+5. Wiederhole KEINE Informationen die bereits im Verlauf gegeben wurden
+6. Wenn Anhänge vorhanden: kurz erwähnen wo sinnvoll
+7. KEIN "ß" — schreibe immer "ss"
+8. Kurz und präzise — keine unnötigen Floskeln
 
-Erstelle NUR den Antwortentwurf (kein JSON, kein Kommentar davor oder danach):
+Erstelle NUR den HTML-Inhalt (keine Anrede, kein Gruss, kein JSON, kein Kommentar):
 """
+
+REFINE_PROMPT = """\
+Du bist der E-Mail-Assistent von Helbling & Co. AG.
+Der Benutzer möchte folgenden E-Mail-Entwurf verbessern.
+
+## Aktueller Entwurf (HTML):
+{current_html}
+
+## Benutzer-Anweisung:
+{instruction}
+
+## Regeln:
+1. Gib den verbesserten Entwurf als HTML zurück (nur Body-Inhalt, keine vollständige HTML-Seite)
+2. KEIN "ß" — schreibe immer "ss"
+3. Behalte die grundlegende Struktur bei, es sei denn der Benutzer wünscht etwas anderes
+4. Markiere unsichere Stellen mit [PRÜFEN: ...]
+
+Gib NUR den verbesserten HTML-Inhalt zurück (keine Erklärung):
+"""
+
+# Mapping von Aktionstyp zu Template-Datei
+AKTIONSTYP_TEMPLATE_MAP = {
+    "ANFRAGE": "anfrage",
+    "ANGEBOT_ANFRAGE": "angebot",
+    "REKLAMATION": "reklamation",
+    "TERMIN": "termin",
+    "NACHFASSEN": "nachfassen",
+    "BESTELLUNG": "angebot",
+    "INFO": "allgemein",
+    "INTERN": "allgemein",
+}
 
 
 @dataclass
@@ -72,10 +107,14 @@ class DraftResult:
     subject: str
     recipient: str
     draft_text: str
+    draft_html: str
+    template_used: str
+    signatur_key: str
     used_knowledge_sources: list
     classification_bereich: str
     classification_aktionstyp: str
-    has_check_markers: bool  # Hat [PRÜFEN: ...] Markierungen
+    has_check_markers: bool
+    refinement_history: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -83,15 +122,19 @@ class DraftResult:
             "subject": self.subject,
             "recipient": self.recipient,
             "draft_text": self.draft_text,
+            "draft_html": self.draft_html,
+            "template_used": self.template_used,
+            "signatur_key": self.signatur_key,
             "used_knowledge_sources": self.used_knowledge_sources,
             "classification_bereich": self.classification_bereich,
             "classification_aktionstyp": self.classification_aktionstyp,
             "has_check_markers": self.has_check_markers,
+            "refinement_history": self.refinement_history,
         }
 
 
 class Drafter:
-    """Generiert Antwortentwürfe für E-Mails."""
+    """Generiert Antwortentwürfe für E-Mails als HTML."""
 
     def __init__(
         self,
@@ -104,7 +147,62 @@ class Drafter:
         self.config = config or {}
 
         drafts_cfg = self.config.get("drafts", {})
-        self.signatur = drafts_cfg.get("signatur", "Freundliche Grüsse\n\nHelbling & Co. AG")
+        self.signaturen = drafts_cfg.get("signaturen", {})
+        self.default_signatur = drafts_cfg.get("default_signatur", "standard")
+        self.bereich_signatur_map = drafts_cfg.get("bereich_signatur_mapping", {})
+        self.templates_dir = Path(
+            drafts_cfg.get("templates_dir", "./templates/drafts")
+        )
+
+        # Fallback für alte Konfiguration
+        if not self.signaturen:
+            old_sig = drafts_cfg.get("signatur", "Freundliche Grüsse\n\nHelbling & Co. AG")
+            self.signaturen = {
+                "standard": {"name": "Helbling & Co. AG", "text": old_sig, "html": f"<p>{old_sig}</p>"}
+            }
+
+    def get_signatur_for_bereich(self, bereich: str) -> str:
+        """Gibt den Signatur-Key für einen Bereich zurück."""
+        return self.bereich_signatur_map.get(bereich, self.default_signatur)
+
+    def get_signatur_html(self, key: str) -> str:
+        """Gibt die HTML-Signatur für einen Key zurück."""
+        sig = self.signaturen.get(key, self.signaturen.get(self.default_signatur, {}))
+        return sig.get("html", sig.get("text", ""))
+
+    def get_signatur_text(self, key: str) -> str:
+        """Gibt die Text-Signatur für einen Key zurück."""
+        sig = self.signaturen.get(key, self.signaturen.get(self.default_signatur, {}))
+        return sig.get("text", "")
+
+    def get_all_signaturen(self) -> dict:
+        """Gibt alle verfügbaren Signaturen zurück."""
+        return {k: v.get("name", k) for k, v in self.signaturen.items()}
+
+    def _load_template(self, aktionstyp: str) -> Optional[str]:
+        """Lädt eine HTML-Vorlage basierend auf dem Aktionstyp."""
+        template_name = AKTIONSTYP_TEMPLATE_MAP.get(aktionstyp, "allgemein")
+        template_path = self.templates_dir / f"{template_name}.html"
+        if template_path.exists():
+            return template_path.read_text(encoding="utf-8")
+        logger.warning(f"Template nicht gefunden: {template_path}")
+        return None
+
+    def _build_html_draft(
+        self,
+        template_html: str,
+        anrede: str,
+        inhalt_html: str,
+        signatur_html: str,
+        betreff: str,
+    ) -> str:
+        """Setzt den HTML-Entwurf aus Template, Inhalt und Signatur zusammen."""
+        html = template_html
+        html = html.replace("{{anrede}}", anrede)
+        html = html.replace("{{inhalt}}", inhalt_html)
+        html = html.replace("{{signatur}}", signatur_html)
+        html = html.replace("{{betreff}}", betreff)
+        return html
 
     def generate_draft(
         self,
@@ -112,8 +210,9 @@ class Drafter:
         thread_analysis: ThreadAnalysis,
         classification: Classification,
         knowledge_chunks: Optional[list] = None,
+        signatur_key: Optional[str] = None,
     ) -> DraftResult:
-        """Generiert einen Antwortentwurf."""
+        """Generiert einen Antwortentwurf als HTML."""
         # Relevante Wissens-Chunks laden wenn nicht übergeben
         if knowledge_chunks is None:
             query = f"{parsed_email.subject} {classification.bereich} {classification.aktionstyp}"
@@ -136,12 +235,17 @@ class Drafter:
                        for a in parsed_email.attachments]
             attachment_info = ", ".join(att_list)
 
-        # E-Mail-Content (nur aktuelle Nachricht, nicht den ganzen Thread)
+        # E-Mail-Content
         email_content = parsed_email.body_plain[:2000]
         if len(parsed_email.body_plain) > 2000:
             email_content += "\n[... Text gekürzt ...]"
 
         date_str = format_datetime(parsed_email.date) if parsed_email.date else "Unbekannt"
+
+        # Signatur bestimmen
+        if signatur_key is None:
+            signatur_key = self.get_signatur_for_bereich(classification.bereich)
+        signatur_text = self.get_signatur_text(signatur_key)
 
         prompt = DRAFT_PROMPT.format(
             thread_context=thread_context,
@@ -164,22 +268,45 @@ class Drafter:
             aktionstyp=classification.aktionstyp,
             zusammenfassung=classification.zusammenfassung,
             dringlichkeit=classification.dringlichkeit,
-            signatur=self.signatur,
         )
 
         try:
-            draft_text = self.api.complete(prompt, max_tokens=1500)
+            inhalt_html = self.api.complete(prompt, max_tokens=1500)
         except Exception as e:
             logger.error(f"Fehler beim Generieren des Entwurfs: {e}")
-            draft_text = self._fallback_draft(parsed_email, classification)
+            inhalt_html = self._fallback_inhalt(parsed_email, classification)
 
-        has_check_markers = "[PRÜFEN:" in draft_text
+        # Template laden und zusammensetzen
+        template_name = AKTIONSTYP_TEMPLATE_MAP.get(classification.aktionstyp, "allgemein")
+        template_html = self._load_template(classification.aktionstyp)
+        signatur_html = self.get_signatur_html(signatur_key)
+
+        if template_html:
+            anrede = "Sehr geehrte Damen und Herren,"
+            draft_html = self._build_html_draft(
+                template_html, anrede, inhalt_html, signatur_html, parsed_email.subject
+            )
+        else:
+            # Fallback: einfaches HTML
+            draft_html = (
+                f'<p>Sehr geehrte Damen und Herren,</p>\n'
+                f'{inhalt_html}\n'
+                f'{signatur_html}'
+            )
+
+        # Plain-Text Version
+        draft_text = self._html_to_text(inhalt_html, signatur_text)
+
+        has_check_markers = "[PRÜFEN:" in draft_html or "[PRÜFEN:" in draft_text
 
         result = DraftResult(
             email_id=parsed_email.email_id,
             subject=f"Re: {parsed_email.subject}",
             recipient=parsed_email.from_addr,
             draft_text=draft_text,
+            draft_html=draft_html,
+            template_used=template_name,
+            signatur_key=signatur_key,
             used_knowledge_sources=knowledge_sources,
             classification_bereich=classification.bereich,
             classification_aktionstyp=classification.aktionstyp,
@@ -188,9 +315,18 @@ class Drafter:
 
         logger.info(
             f"Entwurf generiert für: {parsed_email.subject} "
-            f"({'mit' if has_check_markers else 'ohne'} PRÜFEN-Marker)"
+            f"(Template: {template_name}, Signatur: {signatur_key}, "
+            f"{'mit' if has_check_markers else 'ohne'} PRÜFEN-Marker)"
         )
         return result
+
+    def refine_draft(self, current_html: str, instruction: str) -> str:
+        """Verfeinert einen bestehenden Entwurf basierend auf Benutzer-Anweisung."""
+        prompt = REFINE_PROMPT.format(
+            current_html=current_html,
+            instruction=instruction,
+        )
+        return self.api.complete(prompt, max_tokens=1500)
 
     def _format_thread_context(self, ta: ThreadAnalysis) -> str:
         """Formatiert den Thread-Kontext für den Prompt."""
@@ -204,14 +340,29 @@ class Drafter:
             f"Kontext: {ta.kontext_fuer_antwort}"
         )
 
-    def _fallback_draft(
+    def _fallback_inhalt(
         self, parsed_email: ParsedEmail, classification: Classification
     ) -> str:
-        """Fallback-Entwurf wenn API nicht verfügbar."""
+        """Fallback-Inhalt wenn API nicht verfügbar."""
         return (
-            f"Sehr geehrte/r [PRÜFEN: Name],\n\n"
-            f"vielen Dank für Ihre E-Mail vom [PRÜFEN: Datum] "
-            f"zum Thema '{parsed_email.subject}'.\n\n"
-            f"[PRÜFEN: Antwort auf die Anfrage formulieren]\n\n"
-            f"{self.signatur}"
+            f"<p>Vielen Dank für Ihre E-Mail vom [PRÜFEN: Datum] "
+            f"zum Thema &laquo;{parsed_email.subject}&raquo;.</p>\n"
+            f"<p>[PRÜFEN: Antwort auf die Anfrage formulieren]</p>"
         )
+
+    def _html_to_text(self, inhalt_html: str, signatur_text: str) -> str:
+        """Einfache Konversion von HTML zu Text."""
+        import re
+        text = inhalt_html
+        text = re.sub(r'<br\s*/?>', '\n', text)
+        text = re.sub(r'</p>\s*<p', '\n\n<p', text)
+        text = re.sub(r'<li>', '- ', text)
+        text = re.sub(r'</li>', '\n', text)
+        text = re.sub(r'<[^>]+>', '', text)
+        text = re.sub(r'&amp;', '&', text)
+        text = re.sub(r'&laquo;', '«', text)
+        text = re.sub(r'&raquo;', '»', text)
+        text = re.sub(r'&lt;', '<', text)
+        text = re.sub(r'&gt;', '>', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return f"Sehr geehrte Damen und Herren,\n\n{text.strip()}\n\n{signatur_text}"

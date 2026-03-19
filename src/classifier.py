@@ -124,15 +124,8 @@ class Classifier:
         if parsed_email.attachments:
             att_names = ", ".join(a.filename for a in parsed_email.attachments)
 
-        # Vollständiger Inhalt: body_plain + eingebettete Thread-Nachrichten
-        _parts = [parsed_email.body_plain or ""]
-        for _tm in (parsed_email.thread_messages or []):
-            if _tm.body and _tm.body.strip():
-                _header = f"--- Von: {_tm.sender} ---" if _tm.sender else "--- Weitergeleitet ---"
-                _parts.append(_header)
-                _parts.append(_tm.body.strip())
-        _full = "\n\n".join(p for p in _parts if p.strip())
-        content = truncate_text(_full, 4000)
+        # E-Mail-Content kürzen
+        content = truncate_text(parsed_email.body_plain, 2000)
         date_str = format_datetime(parsed_email.date) if parsed_email.date else "Unbekannt"
 
         prompt = CLASSIFICATION_PROMPT.format(
