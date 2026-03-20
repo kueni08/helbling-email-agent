@@ -253,6 +253,91 @@ def create_app(config: dict = None) -> Flask:
         safe_name = secure_filename(filename)
         return send_from_directory(str(att_dir), safe_name)
 
+    @app.route("/api/emails/<email_id>/feedback", methods=["POST"])
+    def api_email_feedback(email_id):
+        """Speichert Feedback/Korrektur zur E-Mail-Klassifikation fuer Teaching."""
+        data = request.get_json() or {}
+        correction = {
+            "bereich": data.get("bereich"),
+            "aktionstyp": data.get("aktionstyp"),
+            "benoetigt_antwort": data.get("benoetigt_antwort"),
+            "benoetigt_aufgabe": data.get("benoetigt_aufgabe"),
+            "kommentar": data.get("kommentar", ""),
+        }
+        # Remove None values
+        correction = {k: v for k, v in correction.items() if v is not None}
+
+        # 1. Update individual result JSON
+        result_path = output_path / "logs" / f"{email_id}.json"
+        if result_path.exists():
+            with open(result_path, encoding="utf-8") as f:
+                result = json.load(f)
+            if "classification" not in result:
+                result["classification"] = {}
+            # Store original if not already stored
+            if "original_classification" not in result:
+                result["original_classification"] = dict(result["classification"])
+            # Apply corrections
+            for k, v in correction.items():
+                if k != "kommentar":
+                    result["classification"][k] = v
+            result["feedback_correction"] = correction
+            result["feedback_at"] = datetime.now().isoformat()
+            with open(result_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+
+        # 2. Update in all_results.json
+        results_file = output_path / "logs" / "all_results.json"
+        if results_file.exists():
+            try:
+                with open(results_file, encoding="utf-8") as f:
+                    all_results = json.load(f)
+                for r in all_results:
+                    if r.get("email_id") == email_id:
+                        if "classification" not in r:
+                            r["classification"] = {}
+                        for k, v in correction.items():
+                            if k != "kommentar":
+                                r["classification"][k] = v
+                        r["feedback_correction"] = correction
+                        break
+                with open(results_file, "w", encoding="utf-8") as f:
+                    json.dump(all_results, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+        # 3. Save to feedback log for future training
+        feedback_log = output_path / "logs" / "classification_feedback.json"
+        log_entries = []
+        if feedback_log.exists():
+            try:
+                with open(feedback_log, encoding="utf-8") as f:
+                    log_entries = json.load(f)
+            except Exception:
+                pass
+
+        # Load email context for training data
+        email_context = {}
+        if result_path.exists():
+            with open(result_path, encoding="utf-8") as f:
+                result_data = json.load(f)
+            email_context = {
+                "subject": result_data.get("subject", ""),
+                "from_addr": result_data.get("from_addr", ""),
+                "original_classification": result_data.get("original_classification", {}),
+            }
+
+        log_entries.append({
+            "email_id": email_id,
+            "correction": correction,
+            "email_context": email_context,
+            "timestamp": datetime.now().isoformat(),
+        })
+        with open(feedback_log, "w", encoding="utf-8") as f:
+            json.dump(log_entries, f, ensure_ascii=False, indent=2)
+
+        return jsonify({"ok": True})
+
     @app.route("/api/emails/<email_id>/delete", methods=["POST"])
     def api_email_delete(email_id):
         """Löscht eine verarbeitete E-Mail (Hard-Delete aus Listen, Dateien verschieben)."""
@@ -541,6 +626,22 @@ def create_app(config: dict = None) -> Flask:
             return jsonify({"ok": True, "refined_html": refined_html})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/drafts/<file_id>/status", methods=["POST"])
+    def api_draft_status(file_id):
+        """Setzt den Status eines Entwurfs (offen/abgeschlossen/archiviert)."""
+        draft_path = output_path / "drafts" / f"{file_id}_draft.json"
+        if not draft_path.exists():
+            return jsonify({"error": "Nicht gefunden"}), 404
+        data = request.get_json() or {}
+        new_status = data.get("status", "offen")
+        with open(draft_path, encoding="utf-8") as f:
+            draft = json.load(f)
+        draft["status"] = new_status
+        draft["status_changed_at"] = datetime.now().isoformat()
+        with open(draft_path, "w", encoding="utf-8") as f:
+            json.dump(draft, f, ensure_ascii=False, indent=2)
+        return jsonify({"ok": True, "status": new_status})
 
     @app.route("/api/drafts/<file_id>/delete", methods=["POST"])
     def api_draft_delete(file_id):
