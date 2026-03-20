@@ -53,13 +53,27 @@ def get_email_id(file_path: str) -> str:
     try:
         with open(file_path, "rb") as f:
             content = f.read(1000)
-        hash_input = f"{path.name}{content}".encode()
+        hash_input = path.name.encode("utf-8", errors="replace") + content
     except Exception:
-        hash_input = path.name.encode()
+        hash_input = path.name.encode("utf-8", errors="replace")
 
     file_hash = hashlib.md5(hash_input).hexdigest()[:8]
     timestamp = datetime.now().strftime("%Y%m%d")
-    return f"{timestamp}_{path.stem}_{file_hash}"
+
+    # Sanitize stem: nur ASCII-sichere Zeichen behalten, Umlaute ersetzen
+    import re
+    import unicodedata
+    stem = path.stem
+    # NFKD-Normalisierung: ü -> u + combining diaeresis, dann combining marks entfernen
+    stem = unicodedata.normalize("NFKD", stem)
+    stem = stem.encode("ascii", errors="ignore").decode("ascii")
+    # Nur alphanumerisch, Bindestrich, Unterstrich behalten
+    stem = re.sub(r"[^a-zA-Z0-9_\-]", "_", stem)
+    # Mehrfache Unterstriche zusammenfassen, max 60 Zeichen
+    stem = re.sub(r"_+", "_", stem).strip("_")[:60]
+    if not stem:
+        stem = "email"
+    return f"{timestamp}_{stem}_{file_hash}"
 
 
 def ensure_dirs(config: dict):

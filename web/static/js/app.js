@@ -240,7 +240,50 @@ async function showEmailDetail(emailId) {
           <h3>Aufgabe</h3>
           <button class="btn btn-secondary btn-sm" onclick="showTaskById('${data.task_id}')">📋 ${data.task_id}</button>
         </div>` : ''}
-      <div style="display:flex;gap:8px;margin-top:16px;border-top:1px solid var(--border);padding-top:16px">
+      <div class="detail-section">
+        <h3>Feedback / Korrektur</h3>
+        ${data.feedback_correction ? '<div style="color:var(--green);font-size:12px;margin-bottom:6px">Bereits korrigiert</div>' : ''}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+          <label style="font-size:12px;color:var(--text-dim)">Bereich:</label>
+          <select id="fb-bereich-${data.email_id}" class="sig-select" style="font-size:12px">
+            <option value="">(beibehalten)</option>
+            <option value="SIBOX" ${clf.bereich === 'SIBOX' ? 'selected' : ''}>SIBOX</option>
+            <option value="FACETTESTAR" ${clf.bereich === 'FACETTESTAR' ? 'selected' : ''}>FACETTESTAR</option>
+            <option value="ALLGEMEIN" ${clf.bereich === 'ALLGEMEIN' ? 'selected' : ''}>ALLGEMEIN</option>
+          </select>
+          <label style="font-size:12px;color:var(--text-dim)">Typ:</label>
+          <select id="fb-typ-${data.email_id}" class="sig-select" style="font-size:12px">
+            <option value="">(beibehalten)</option>
+            <option value="ANFRAGE" ${clf.aktionstyp === 'ANFRAGE' ? 'selected' : ''}>ANFRAGE</option>
+            <option value="ANGEBOT_ANFRAGE" ${clf.aktionstyp === 'ANGEBOT_ANFRAGE' ? 'selected' : ''}>ANGEBOT_ANFRAGE</option>
+            <option value="REKLAMATION" ${clf.aktionstyp === 'REKLAMATION' ? 'selected' : ''}>REKLAMATION</option>
+            <option value="TERMIN" ${clf.aktionstyp === 'TERMIN' ? 'selected' : ''}>TERMIN</option>
+            <option value="NACHFASSEN" ${clf.aktionstyp === 'NACHFASSEN' ? 'selected' : ''}>NACHFASSEN</option>
+            <option value="BESTELLUNG" ${clf.aktionstyp === 'BESTELLUNG' ? 'selected' : ''}>BESTELLUNG</option>
+            <option value="INFO" ${clf.aktionstyp === 'INFO' ? 'selected' : ''}>INFO</option>
+            <option value="INTERN" ${clf.aktionstyp === 'INTERN' ? 'selected' : ''}>INTERN</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+          <label style="font-size:12px;color:var(--text-dim)">Antwort noetig:</label>
+          <select id="fb-antwort-${data.email_id}" class="sig-select" style="font-size:12px">
+            <option value="">(beibehalten)</option>
+            <option value="true" ${clf.benoetigt_antwort ? 'selected' : ''}>Ja</option>
+            <option value="false" ${!clf.benoetigt_antwort ? 'selected' : ''}>Nein</option>
+          </select>
+          <label style="font-size:12px;color:var(--text-dim)">Aufgabe noetig:</label>
+          <select id="fb-aufgabe-${data.email_id}" class="sig-select" style="font-size:12px">
+            <option value="">(beibehalten)</option>
+            <option value="true" ${clf.benoetigt_aufgabe ? 'selected' : ''}>Ja</option>
+            <option value="false" ${!clf.benoetigt_aufgabe ? 'selected' : ''}>Nein</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="fb-kommentar-${data.email_id}" placeholder="Optionaler Kommentar..." style="flex:1;font-size:12px" />
+          <button class="btn btn-primary btn-sm" onclick="submitEmailFeedback('${data.email_id}')">Feedback speichern</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;border-top:1px solid var(--border);padding-top:12px">
         ${!data.deleted ? `<button class="btn btn-danger btn-sm" onclick="deleteEmail('${data.email_id}')">🗑 Loeschen</button>` : '<span style="color:var(--text-dim);font-size:12px">🗑 Bereits geloescht</span>'}
       </div>
     `;
@@ -275,6 +318,10 @@ async function loadDrafts() {
     const rows = drafts.map(d => {
       const warnIcon = d.has_check_markers ? '⚠' : '✓';
       const warnColor = d.has_check_markers ? 'var(--orange)' : 'var(--green)';
+      const st = d.status || 'offen';
+      const stBadge = st === 'abgeschlossen' ? '<span class="badge badge-erledigt">abgeschlossen</span>'
+        : st === 'archiviert' ? '<span class="badge badge-allgemein">archiviert</span>'
+        : '<span class="badge badge-offen">offen</span>';
       return `
         <tr class="clickable" onclick="showDraftById('${d.email_id}')">
           <td>${d.subject || '—'}</td>
@@ -282,13 +329,14 @@ async function loadDrafts() {
           <td>${bereichBadge(d.classification_bereich)}</td>
           <td><span class="badge badge-info">${d.classification_aktionstyp || '—'}</span></td>
           <td><span style="color:${warnColor}">${warnIcon}</span></td>
+          <td>${stBadge}</td>
         </tr>`;
     }).join('');
 
     container.innerHTML = `
       <table class="data-table">
         <thead><tr>
-          <th>Betreff</th><th>Empfänger</th><th>Bereich</th><th>Typ</th><th>Check</th>
+          <th>Betreff</th><th>Empfaenger</th><th>Bereich</th><th>Typ</th><th>Check</th><th>Status</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -320,6 +368,7 @@ async function showDraftById(fileId) {
     var feedbackRating = draft.feedback_rating || '';
     var templateUsed = draft.template_used || 'allgemein';
     var signaturKey = draft.signatur_key || sigConfig.default || 'standard';
+    var draftStatus = draft.status || 'offen';
     var history = draft.refinement_history || [];
 
     // Signatur Dropdown bauen
@@ -374,6 +423,17 @@ async function showDraftById(fileId) {
         '</div>' +
       '</div>' +
       historyHtml +
+      // Status
+      '<div class="detail-section">' +
+        '<h3>Status</h3>' +
+        '<div style="display:flex;gap:6px;align-items:center">' +
+          '<span style="font-size:12px;color:var(--text-dim)">Aktuell: </span>' +
+          '<span class="badge badge-' + (draftStatus === 'abgeschlossen' ? 'erledigt' : draftStatus === 'archiviert' ? 'allgemein' : 'offen') + '">' + (draftStatus || 'offen') + '</span>' +
+          (draftStatus !== 'abgeschlossen' ? '<button class="btn btn-success btn-sm" onclick="setDraftStatus(\'' + fileId + '\', \'abgeschlossen\')">Abschliessen</button>' : '') +
+          (draftStatus !== 'archiviert' ? '<button class="btn btn-secondary btn-sm" onclick="setDraftStatus(\'' + fileId + '\', \'archiviert\')">Archivieren</button>' : '') +
+          (draftStatus && draftStatus !== 'offen' ? '<button class="btn btn-secondary btn-sm" onclick="setDraftStatus(\'' + fileId + '\', \'offen\')">Wieder oeffnen</button>' : '') +
+        '</div>' +
+      '</div>' +
       // Actions
       '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px">' +
         '<button class="btn btn-primary btn-sm" onclick="copyDraft(\'' + draftText.replace(/'/g, "\\'").replace(/\n/g, "\\n") + '\')">In Zwischenablage</button>' +
@@ -1144,6 +1204,43 @@ function removePostfach(index) {
   renderPostfaecher();
   updatePostfachFilter();
   showToast('Postfach entfernt', 'success');
+}
+
+// --- EMAIL FEEDBACK ---
+async function submitEmailFeedback(emailId) {
+  var bereich = document.getElementById('fb-bereich-' + emailId)?.value || '';
+  var typ = document.getElementById('fb-typ-' + emailId)?.value || '';
+  var antwort = document.getElementById('fb-antwort-' + emailId)?.value;
+  var aufgabe = document.getElementById('fb-aufgabe-' + emailId)?.value;
+  var kommentar = document.getElementById('fb-kommentar-' + emailId)?.value || '';
+
+  var feedback = { kommentar: kommentar };
+  if (bereich) feedback.bereich = bereich;
+  if (typ) feedback.aktionstyp = typ;
+  if (antwort === 'true') feedback.benoetigt_antwort = true;
+  if (antwort === 'false') feedback.benoetigt_antwort = false;
+  if (aufgabe === 'true') feedback.benoetigt_aufgabe = true;
+  if (aufgabe === 'false') feedback.benoetigt_aufgabe = false;
+
+  try {
+    await API.post('/api/emails/' + emailId + '/feedback', feedback);
+    showToast('Feedback gespeichert — wird beim naechsten Mal beruecksichtigt', 'success');
+    showEmailDetail(emailId);
+    loadEmails();
+  } catch (e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
+}
+
+// --- DRAFT STATUS ---
+async function setDraftStatus(fileId, status) {
+  try {
+    await API.post('/api/drafts/' + fileId + '/status', { status: status });
+    showToast('Entwurf als "' + status + '" markiert', 'success');
+    showDraftById(fileId);
+  } catch (e) {
+    showToast('Fehler: ' + e.message, 'error');
+  }
 }
 
 // --- HELPER: Date Formatting ---
