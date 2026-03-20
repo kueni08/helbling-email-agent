@@ -129,10 +129,10 @@ def resolve_path(path_str: str, base_dir: Path = None) -> Path:
 
 
 def format_datetime(dt: datetime) -> str:
-    """Formatiert ein Datetime für die Ausgabe."""
+    """Formatiert ein Datetime als ISO 8601 fuer JSON/JS-Kompatibilitaet."""
     if dt is None:
-        return "Unbekannt"
-    return dt.strftime("%d.%m.%Y %H:%M")
+        return None
+    return dt.isoformat()
 
 
 def truncate_text(text: str, max_chars: int = 500) -> str:

@@ -130,31 +130,41 @@ class EmlParser:
         with open(file_path, "rb") as f:
             raw_bytes = f.read()
 
-        # Encoding erkennen
-        detected = chardet.detect(raw_bytes)
-        encoding = detected.get("encoding") or "utf-8"
-
+        # Zwei Parsing-Strategien: modern (policy.default) und compat32
+        msg_modern = None
+        msg_compat = None
         try:
-            msg = email.message_from_bytes(
+            msg_modern = email.message_from_bytes(
                 raw_bytes,
                 policy=email.policy.default
             )
         except Exception:
-            msg = email.message_from_bytes(raw_bytes)
+            pass
+        try:
+            msg_compat = email.message_from_bytes(raw_bytes)
+        except Exception:
+            pass
 
-        # Basis-Felder extrahieren
-        subject = self._decode_header_value(msg.get("Subject", ""))
-        from_addr = self._decode_header_value(msg.get("From", ""))
-        to_addrs = self._parse_addr_list(msg.get("To", ""))
-        cc_addrs = self._parse_addr_list(msg.get("Cc", ""))
-        message_id = msg.get("Message-ID", "").strip("<>")
-        in_reply_to = msg.get("In-Reply-To", "").strip("<>") or None
-        references_raw = msg.get("References", "")
+        # Fallback: mindestens eines muss funktionieren
+        msg = msg_modern or msg_compat
+        if msg is None:
+            raise ValueError(f"Konnte EML nicht parsen: {file_path}")
+
+        # Basis-Felder extrahieren — robuste Methoden verwenden
+        subject = self._get_header_decoded(msg_modern, msg_compat, "Subject")
+        from_addr = self._get_header_decoded(msg_modern, msg_compat, "From")
+        to_addrs = self._get_addr_list_decoded(msg_modern, msg_compat, "To")
+        cc_addrs = self._get_addr_list_decoded(msg_modern, msg_compat, "Cc")
+
+        message_id_raw = str(msg.get("Message-ID", "") or "")
+        message_id = message_id_raw.strip("<>")
+        in_reply_to_raw = str(msg.get("In-Reply-To", "") or "")
+        in_reply_to = in_reply_to_raw.strip("<>") or None
+        references_raw = str(msg.get("References", "") or "")
         references = [r.strip("<>") for r in references_raw.split() if r.strip()]
 
-        # Datum parsen
-        date_str = msg.get("Date", "")
-        date = self._parse_date(date_str)
+        # Datum parsen — policy.default kann datetime-Objekt zurueckgeben
+        date = self._get_date(msg_modern, msg_compat)
 
         # Body extrahieren
         body_plain, body_html = self._extract_body(msg)
@@ -162,8 +172,8 @@ class EmlParser:
         # Anhänge extrahieren
         attachments = self._extract_attachments(msg)
 
-        # Headers als Dict
-        headers_raw = dict(msg.items())
+        # Headers als Dict (alle Werte als Strings sicherstellen)
+        headers_raw = {k: str(v) for k, v in msg.items()}
 
         # Thread-Nachrichten aus Body parsen
         thread_messages = self._parse_thread(body_plain, from_addr)
@@ -197,10 +207,161 @@ class EmlParser:
         )
         return parsed
 
-    def _decode_header_value(self, value: str) -> str:
-        """Dekodiert E-Mail-Header (MIME-encoded Words)."""
+    def _get_header_decoded(self, msg_modern, msg_compat, header_name: str) -> str:
+        """Robuste Header-Dekodierung: versucht policy.default, dann compat32 mit decode_header."""
+        result = ""
+
+        # Strategie 1: policy.default liefert bereits dekodierte Strings
+        if msg_modern is not None:
+            try:
+                val = msg_modern.get(header_name)
+                if val is not None:
+                    result = str(val).strip()
+                    # Prüfe ob das Ergebnis sauber ist (keine Ersetzungszeichen)
+                    if "\ufffd" not in result and "=?" not in result:
+                        return result
+            except Exception:
+                pass
+
+        # Strategie 2: compat32 + manuelle decode_header Dekodierung
+        if msg_compat is not None:
+            try:
+                raw_val = msg_compat.get(header_name, "")
+                if raw_val:
+                    decoded = self._decode_header_value(raw_val)
+                    if decoded and "\ufffd" not in decoded:
+                        return decoded
+            except Exception:
+                pass
+
+        # Strategie 3: Raw Bytes Dekodierung mit chardet
+        if msg_compat is not None:
+            try:
+                raw_val = msg_compat.get(header_name, "")
+                if raw_val and isinstance(raw_val, bytes):
+                    detected = chardet.detect(raw_val)
+                    enc = detected.get("encoding") or "utf-8"
+                    return raw_val.decode(enc, errors="replace").strip()
+            except Exception:
+                pass
+
+        return result or ""
+
+    def _get_addr_list_decoded(self, msg_modern, msg_compat, header_name: str) -> list:
+        """Robuste Adresslisten-Dekodierung."""
+        addrs = []
+
+        # Strategie 1: policy.default — strukturierte Address-Objekte
+        if msg_modern is not None:
+            try:
+                header_obj = msg_modern.get(header_name)
+                if header_obj is not None:
+                    # policy.default kann AddressHeader mit .addresses zurückgeben
+                    if hasattr(header_obj, 'addresses'):
+                        for addr in header_obj.addresses:
+                            if addr.display_name and addr.addr_spec:
+                                addrs.append(f"{addr.display_name} <{addr.addr_spec}>")
+                            elif addr.addr_spec:
+                                addrs.append(addr.addr_spec)
+                        if addrs:
+                            return addrs
+                    else:
+                        # Fallback: als String behandeln
+                        val = str(header_obj).strip()
+                        if val:
+                            for part in val.split(","):
+                                part = part.strip()
+                                if part:
+                                    addrs.append(part)
+                            if addrs:
+                                return addrs
+            except Exception:
+                pass
+
+        # Strategie 2: compat32 + decode_header
+        if msg_compat is not None:
+            try:
+                raw_val = msg_compat.get(header_name, "")
+                if raw_val:
+                    for part in raw_val.split(","):
+                        decoded = self._decode_header_value(part.strip())
+                        if decoded:
+                            addrs.append(decoded)
+                    if addrs:
+                        return addrs
+            except Exception:
+                pass
+
+        return addrs
+
+    def _get_date(self, msg_modern, msg_compat) -> Optional[datetime]:
+        """Robuste Datums-Extraktion."""
+        from email.utils import parsedate_to_datetime
+
+        # Strategie 1: policy.default liefert ggf. direkt ein datetime
+        if msg_modern is not None:
+            try:
+                date_val = msg_modern.get("Date")
+                if date_val is not None:
+                    # Kann datetime-Objekt oder String sein
+                    if isinstance(date_val, datetime):
+                        return date_val
+                    # Header-Objekt mit datetime-Attribut
+                    if hasattr(date_val, 'datetime'):
+                        return date_val.datetime
+                    # Als String parsen
+                    date_str = str(date_val).strip()
+                    if date_str:
+                        try:
+                            return parsedate_to_datetime(date_str)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Strategie 2: compat32 Raw-Header
+        if msg_compat is not None:
+            try:
+                date_str = msg_compat.get("Date", "")
+                if date_str:
+                    date_str = str(date_str).strip()
+                    try:
+                        return parsedate_to_datetime(date_str)
+                    except Exception:
+                        pass
+                    # Manuelle Patterns
+                    formats = [
+                        "%d %b %Y %H:%M:%S %z",
+                        "%a, %d %b %Y %H:%M:%S %z",
+                        "%a, %d %b %Y %H:%M:%S",
+                        "%d %b %Y %H:%M:%S",
+                        "%d.%m.%Y %H:%M:%S",
+                        "%d.%m.%Y %H:%M",
+                        "%Y-%m-%dT%H:%M:%S%z",
+                        "%Y-%m-%dT%H:%M:%S",
+                    ]
+                    for fmt in formats:
+                        try:
+                            return datetime.strptime(date_str, fmt)
+                        except ValueError:
+                            continue
+            except Exception:
+                pass
+
+        return None
+
+    def _decode_header_value(self, value) -> str:
+        """Dekodiert E-Mail-Header (MIME-encoded Words) — fuer compat32-Modus."""
         if not value:
             return ""
+        if isinstance(value, bytes):
+            try:
+                detected = chardet.detect(value)
+                enc = detected.get("encoding") or "utf-8"
+                return value.decode(enc, errors="replace").strip()
+            except Exception:
+                return value.decode("utf-8", errors="replace").strip()
+        value = str(value)
         try:
             parts = decode_header(value)
             decoded = []
@@ -210,48 +371,28 @@ class EmlParser:
                         try:
                             decoded.append(part.decode(charset))
                         except (LookupError, UnicodeDecodeError):
-                            decoded.append(part.decode("utf-8", errors="replace"))
+                            # Versuche alternative Encodings
+                            for fallback_enc in ["utf-8", "iso-8859-1", "windows-1252", "latin-1"]:
+                                try:
+                                    decoded.append(part.decode(fallback_enc))
+                                    break
+                                except (LookupError, UnicodeDecodeError):
+                                    continue
+                            else:
+                                decoded.append(part.decode("utf-8", errors="replace"))
                     else:
-                        decoded.append(part.decode("utf-8", errors="replace"))
+                        # Kein Charset angegeben: chardet versuchen
+                        detected = chardet.detect(part)
+                        enc = detected.get("encoding") or "utf-8"
+                        try:
+                            decoded.append(part.decode(enc))
+                        except (LookupError, UnicodeDecodeError):
+                            decoded.append(part.decode("utf-8", errors="replace"))
                 else:
                     decoded.append(str(part))
             return "".join(decoded).strip()
         except Exception:
-            return str(value)
-
-    def _parse_addr_list(self, addr_str: str) -> list:
-        """Parst eine kommagetrennte Adressliste."""
-        if not addr_str:
-            return []
-        addrs = []
-        for part in addr_str.split(","):
-            part = self._decode_header_value(part.strip())
-            if part:
-                addrs.append(part)
-        return addrs
-
-    def _parse_date(self, date_str: str) -> Optional[datetime]:
-        """Parst ein Datum aus einem E-Mail-Header."""
-        if not date_str:
-            return None
-        from email.utils import parsedate_to_datetime
-        try:
-            return parsedate_to_datetime(date_str)
-        except Exception:
-            pass
-
-        # Fallback: manuelle Patterns
-        formats = [
-            "%d %b %Y %H:%M:%S %z",
-            "%a, %d %b %Y %H:%M:%S %z",
-            "%d %b %Y %H:%M:%S",
-        ]
-        for fmt in formats:
-            try:
-                return datetime.strptime(date_str.strip(), fmt)
-            except ValueError:
-                continue
-        return None
+            return str(value).strip()
 
     def _extract_body(self, msg) -> tuple:
         """Extrahiert Plain-Text und HTML-Body aus einer MIME-Nachricht."""
